@@ -73,45 +73,57 @@ def setup_logging(config):
 def log_system_info(logger):
     """Log system information for reproducibility"""
     logger.info("=" * 60)
-    logger.info("TRAINING STARTED")
+    logger.info("🚀 DONUT TRAINING STARTED")
     logger.info("=" * 60)
-    logger.info(f"Python version: {sys.version}")
-    logger.info(f"PyTorch version: {torch.__version__}")
-    logger.info(f"PyTorch Lightning version: {pl.__version__}")
-    logger.info(f"CUDA available: {torch.cuda.is_available()}")
+    logger.info(f"🐍 Python: {sys.version.split()[0]}")
+    logger.info(f"🔥 PyTorch: {torch.__version__}")
+    logger.info(f"⚡ Lightning: {pl.__version__}")
+    logger.info(f"🎮 CUDA: {'✅ Available' if torch.cuda.is_available() else '❌ Not Available'}")
     if torch.cuda.is_available():
-        logger.info(f"CUDA version: {torch.version.cuda}")
-        logger.info(f"Number of GPUs: {torch.cuda.device_count()}")
+        logger.info(f"  Version: {torch.version.cuda}")
+        logger.info(f"  GPUs: {torch.cuda.device_count()}")
         for i in range(torch.cuda.device_count()):
-            logger.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
-    logger.info(f"Platform: {sys.platform}")
-    logger.info(f"Working directory: {os.getcwd()}")
+            logger.info(f"    GPU {i}: {torch.cuda.get_device_name(i)}")
+    logger.info(f"💻 Platform: {sys.platform}")
+    logger.info(f"📁 Working Dir: {os.getcwd()}")
     logger.info("=" * 60)
 
 
 @rank_zero_only
 def log_config_summary(logger, config):
     """Log a summary of the configuration"""
-    logger.info("CONFIGURATION SUMMARY")
-    logger.info("-" * 40)
+    logger.info("📋 CONFIGURATION SUMMARY")
+    logger.info("─" * 40)
     
     # Log key training parameters
     key_params = [
-        'exp_name', 'exp_version', 'seed', 'max_epochs', 'max_steps',
-        'lr', 'warmup_steps', 'gradient_clip_val', 'train_batch_sizes',
-        'val_batch_sizes', 'num_workers', 'input_size', 'max_length'
+        ('exp_name', 'Experiment'),
+        ('exp_version', 'Version'),
+        ('seed', 'Seed'),
+        ('max_epochs', 'Max Epochs'),
+        ('max_steps', 'Max Steps'),
+        ('lr', 'Learning Rate'),
+        ('warmup_steps', 'Warmup Steps'),
+        ('gradient_clip_val', 'Gradient Clip'),
+        ('train_batch_sizes', 'Train Batch Size'),
+        ('val_batch_sizes', 'Val Batch Size'),
+        ('num_workers', 'Workers'),
+        ('input_size', 'Input Size'),
+        ('max_length', 'Max Length')
     ]
     
-    for param in key_params:
+    for param, label in key_params:
         if hasattr(config, param):
-            logger.info(f"{param}: {getattr(config, param)}")
+            value = getattr(config, param)
+            logger.info(f"  {label:15}: {value}")
     
     # Log dataset information
-    logger.info(f"Number of datasets: {len(config.dataset_name_or_paths)}")
+    logger.info(f"  {'Datasets':15}: {len(config.dataset_name_or_paths)}")
     for i, dataset_path in enumerate(config.dataset_name_or_paths):
-        logger.info(f"Dataset {i}: {dataset_path}")
+        dataset_name = os.path.basename(dataset_path)
+        logger.info(f"    Dataset {i}: {dataset_name}")
     
-    logger.info("-" * 40)
+    logger.info("─" * 40)
 
 
 class CustomCheckpointIO(CheckpointIO):
@@ -181,21 +193,21 @@ def train(config):
         # Set seed
         set_seed(config.get("seed", 42), logger)
         
-        logger.info("Initializing model and data modules...")
+        logger.info("🔧 Initializing model and data modules...")
         model_module = DonutModelPLModule(config)
         data_module = DonutDataPLModule(config)
-        logger.info("Model and data modules initialized successfully")
+        logger.info("✅ Model and data modules initialized successfully")
 
         # add datasets to data_module
-        logger.info("Setting up datasets...")
+        logger.info("📚 Setting up datasets...")
         datasets = {"train": [], "validation": []}
         for i, dataset_name_or_path in enumerate(config.dataset_name_or_paths):
             task_name = os.path.basename(dataset_name_or_path)  # e.g., cord-v2, docvqa, rvlcdip, ...
-            logger.info(f"Processing dataset {i+1}/{len(config.dataset_name_or_paths)}: {task_name}")
+            logger.info(f"  Processing dataset {i+1}/{len(config.dataset_name_or_paths)}: {task_name}")
             
             # add categorical special tokens (optional)
             if task_name == "rvlcdip":
-                logger.info("Adding RVL-CDIP special tokens")
+                logger.info("    Adding RVL-CDIP special tokens")
                 model_module.model.decoder.add_special_tokens([
                     "<advertisement/>", "<budget/>", "<email/>", "<file_folder/>", 
                     "<form/>", "<handwritten/>", "<invoice/>", "<letter/>", 
@@ -203,11 +215,11 @@ def train(config):
                     "<resume/>", "<scientific_publication/>", "<scientific_report/>", "<specification/>"
                 ])
             if task_name == "docvqa":
-                logger.info("Adding DocVQA special tokens")
+                logger.info("    Adding DocVQA special tokens")
                 model_module.model.decoder.add_special_tokens(["<yes/>", "<no/>"])
                 
             for split in ["train", "validation"]:
-                logger.info(f"Creating {split} dataset for {task_name}")
+                logger.info(f"    Creating {split} dataset for {task_name}")
                 datasets[split].append(
                     DonutDataset(
                         dataset_name_or_path=dataset_name_or_path,
@@ -221,14 +233,14 @@ def train(config):
                         sort_json_key=config.sort_json_key,
                     )
                 )
-                logger.info(f"{split.capitalize()} dataset created for {task_name}")
+                logger.info(f"    ✅ {split.capitalize()} dataset created for {task_name}")
                 
         data_module.train_datasets = datasets["train"]
         data_module.val_datasets = datasets["validation"]
-        logger.info(f"Dataset setup complete. Train datasets: {len(datasets['train'])}, Val datasets: {len(datasets['validation'])}")
+        logger.info(f"✅ Dataset setup complete. Train: {len(datasets['train'])}, Val: {len(datasets['validation'])}")
 
         # Setup logging and callbacks
-        logger.info("Setting up TensorBoard logger...")
+        logger.info("📊 Setting up TensorBoard logger...")
         logger = TensorBoardLogger(
             save_dir=config.result_path,
             name=config.exp_name,
@@ -236,7 +248,7 @@ def train(config):
             default_hp_metric=False,
         )
 
-        logger.info("Setting up callbacks...")
+        logger.info("⚙️  Setting up callbacks...")
         lr_callback = LearningRateMonitor(logging_interval="step")
 
         checkpoint_callback = ModelCheckpoint(
@@ -253,7 +265,7 @@ def train(config):
         custom_ckpt = CustomCheckpointIO()
         
         # Setup trainer
-        logger.info("Configuring PyTorch Lightning trainer...")
+        logger.info("🏃 Configuring PyTorch Lightning trainer...")
         trainer = pl.Trainer(
             num_nodes=config.get("num_nodes", 1),
             devices=torch.cuda.device_count(),
@@ -270,12 +282,14 @@ def train(config):
             logger=logger,
             callbacks=[lr_callback, checkpoint_callback, bar],
         )
-        logger.info("Trainer configured successfully")
+        logger.info("✅ Trainer configured successfully")
 
         # Start training
-        logger.info("Starting training...")
+        logger.info("🎯 Starting training...")
+        logger.info("─" * 60)
         trainer.fit(model_module, data_module, ckpt_path=config.get("resume_from_checkpoint_path", None))
-        logger.info("Training completed successfully!")
+        logger.info("─" * 60)
+        logger.info("🎉 Training completed successfully!")
         
     except Exception as e:
         logger.error(f"Training failed with error: {str(e)}", exc_info=True)

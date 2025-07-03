@@ -33,10 +33,10 @@ class DonutModelPLModule(pl.LightningModule):
         self.config = config
         self.logger = get_logger()
 
-        self.logger.info("Initializing DonutModelPLModule...")
+        self.logger.info("🔧 Initializing DonutModelPLModule...")
         
         if self.config.get("pretrained_model_name_or_path", False):
-            self.logger.info(f"Loading pretrained model from: {self.config.pretrained_model_name_or_path}")
+            self.logger.info(f"📥 Loading pretrained model: {self.config.pretrained_model_name_or_path}")
             self.model = DonutModel.from_pretrained(
                 self.config.pretrained_model_name_or_path,
                 input_size=self.config.input_size,
@@ -44,9 +44,9 @@ class DonutModelPLModule(pl.LightningModule):
                 align_long_axis=self.config.align_long_axis,
                 ignore_mismatched_sizes=True,
             )
-            self.logger.info("Pretrained model loaded successfully")
+            self.logger.info("✅ Pretrained model loaded successfully")
         else:
-            self.logger.info("Creating new Donut model from scratch")
+            self.logger.info("🏗️  Creating new Donut model from scratch")
             self.model = DonutModel(
                 config=DonutConfig(
                     input_size=self.config.input_size,
@@ -56,19 +56,24 @@ class DonutModelPLModule(pl.LightningModule):
                     # encoder_layer=[2,2,14,2], decoder_layer=4, ...
                 )
             )
-            self.logger.info("New model created successfully")
+            self.logger.info("✅ New model created successfully")
             
         self.pytorch_lightning_version_is_1 = int(pl.__version__[0]) < 2
         self.num_of_loaders = len(self.config.dataset_name_or_paths)
-        self.logger.info(f"Number of dataloaders: {self.num_of_loaders}")
+        self.logger.info(f"📊 Number of dataloaders: {self.num_of_loaders}")
         
         # Log model architecture info
         total_params = sum(p.numel() for p in self.model.parameters())
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        self.logger.info(f"Total model parameters: {total_params:,}")
-        self.logger.info(f"Trainable parameters: {trainable_params:,}")
-        self.logger.info(f"Model initialization completed")
+        self.logger.info(f"🧮 Total parameters: {total_params:,}")
+        self.logger.info(f"🎯 Trainable parameters: {trainable_params:,}")
+        self.logger.info(f"✅ Model initialization completed")
 
+    def on_train_epoch_start(self):
+        super().on_train_epoch_start()
+        current_epoch = self.current_epoch
+        self.logger.info(f"🚀 Epoch {current_epoch} | Starting training...")
+        
     def training_step(self, batch, batch_idx):
         # Log training step info periodically
         if batch_idx % 100 == 0:
@@ -89,9 +94,9 @@ class DonutModelPLModule(pl.LightningModule):
             
         loss = self.model(image_tensors, decoder_input_ids, decoder_labels)[0]
         
-        # Log loss periodically
-        if batch_idx % 50 == 0:
-            self.logger.info(f"Training step {batch_idx}: Loss = {loss.item():.4f}")
+        # Log loss periodically with better formatting
+        if batch_idx % 20 == 0:
+            self.logger.info(f"Step {batch_idx:3d} | Loss: {loss.item():.4f}")
             
         self.log_dict({"train_loss": loss}, sync_dist=True)
         if not self.pytorch_lightning_version_is_1:
@@ -101,7 +106,8 @@ class DonutModelPLModule(pl.LightningModule):
     def on_validation_epoch_start(self) -> None:
         super().on_validation_epoch_start()
         self.validation_step_outputs = [[] for _ in range(self.num_of_loaders)]
-        self.logger.info(f"Starting validation epoch. Number of dataloaders: {self.num_of_loaders}")
+        current_epoch = self.current_epoch
+        self.logger.info(f"🔄 Epoch {current_epoch} | Starting validation...")
         return
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
@@ -135,9 +141,10 @@ class DonutModelPLModule(pl.LightningModule):
             scores.append(score)
 
             if self.config.get("verbose", False) and len(scores) == 1:
-                self.logger.info(f"Sample prediction: {pred}")
-                self.logger.info(f"Sample answer: {answer}")
-                self.logger.info(f"Sample normalized edit distance: {score:.4f}")
+                # Only log a brief summary for verbose mode
+                pred_summary = pred[:50] + "..." if len(pred) > 50 else pred
+                answer_summary = answer[:50] + "..." if len(answer) > 50 else answer
+                self.logger.info(f"Sample - Pred: {pred_summary} | Answer: {answer_summary} | ED: {score:.4f}")
 
         self.validation_step_outputs[dataloader_idx].append(scores)
 
@@ -149,7 +156,8 @@ class DonutModelPLModule(pl.LightningModule):
         total_metric = [0] * self.num_of_loaders
         val_metric = [0] * self.num_of_loaders
         
-        self.logger.info("Computing validation metrics...")
+        current_epoch = self.current_epoch
+        self.logger.info(f"📊 Epoch {current_epoch} | Computing validation metrics...")
         
         for i, results in enumerate(self.validation_step_outputs):
             for scores in results:
@@ -157,11 +165,13 @@ class DonutModelPLModule(pl.LightningModule):
                 total_metric[i] += np.sum(scores)
             val_metric[i] = total_metric[i] / cnt[i]
             val_metric_name = f"val_metric_{i}th_dataset"
-            self.logger.info(f"Dataset {i}: {cnt[i]} samples, average metric: {val_metric[i]:.4f}")
+            self.logger.info(f"  Dataset {i}: {cnt[i]:3d} samples | Metric: {val_metric[i]:.4f}")
             self.log_dict({val_metric_name: val_metric[i]}, sync_dist=True)
             
         overall_metric = np.sum(total_metric) / np.sum(cnt)
-        self.logger.info(f"Overall validation metric: {overall_metric:.4f} (across {np.sum(cnt)} samples)")
+        total_samples = np.sum(cnt)
+        self.logger.info(f"✅ Epoch {current_epoch} | Overall: {overall_metric:.4f} ({total_samples} samples)")
+        self.logger.info("─" * 60)
         self.log_dict({"val_metric": overall_metric}, sync_dist=True)
 
     def configure_optimizers(self):
