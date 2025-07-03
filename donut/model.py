@@ -3,6 +3,7 @@ Donut
 Copyright (c) 2022-present NAVER Corp.
 MIT License
 """
+import logging
 import math
 import os
 import re
@@ -22,6 +23,11 @@ from torchvision.transforms.functional import resize, rotate
 from transformers import MBartConfig, MBartForCausalLM, XLMRobertaTokenizer
 from transformers.file_utils import ModelOutput
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
+
+
+def get_logger():
+    """Get the logger instance for model operations"""
+    return logging.getLogger('donut_training')
 
 
 class SwinEncoder(nn.Module):
@@ -435,24 +441,33 @@ class DonutModel(PreTrainedModel):
             prompt_tensors: (1, sequence_length)
                 convert image to tensor if prompt_tensor is not fed
         """
+        logger = get_logger()
+        logger.debug("Starting inference process")
+        
         # prepare backbone inputs (image and prompt)
         if image is None and image_tensors is None:
+            logger.error("Neither image nor image_tensors provided")
             raise ValueError("Expected either image or image_tensors")
         if all(v is None for v in {prompt, prompt_tensors}):
+            logger.error("Neither prompt nor prompt_tensors provided")
             raise ValueError("Expected either prompt or prompt_tensors")
 
         if image_tensors is None:
+            logger.debug("Preparing image input from PIL Image")
             image_tensors = self.encoder.prepare_input(image).unsqueeze(0)
 
         if self.device.type == "cuda":  # half is not compatible in cpu implementation.
+            logger.debug("Converting to half precision for CUDA")
             image_tensors = image_tensors.half()
             image_tensors = image_tensors.to(self.device)
 
         if prompt_tensors is None:
+            logger.debug(f"Tokenizing prompt: {prompt}")
             prompt_tensors = self.decoder.tokenizer(prompt, add_special_tokens=False, return_tensors="pt")["input_ids"]
 
         prompt_tensors = prompt_tensors.to(self.device)
 
+        logger.debug("Running encoder forward pass")
         last_hidden_state = self.encoder(image_tensors)
         if self.device.type != "cuda":
             last_hidden_state = last_hidden_state.to(torch.float32)
@@ -464,6 +479,7 @@ class DonutModel(PreTrainedModel):
         if len(prompt_tensors.size()) == 1:
             prompt_tensors = prompt_tensors.unsqueeze(0)
 
+        logger.debug("Running decoder generation")
         # get decoder output
         decoder_output = self.decoder.model.generate(
             decoder_input_ids=prompt_tensors,
@@ -479,12 +495,20 @@ class DonutModel(PreTrainedModel):
             output_attentions=return_attentions,
         )
 
+        logger.debug("Processing decoder output")
         output = {"predictions": list()}
-        for seq in self.decoder.tokenizer.batch_decode(decoder_output.sequences):
+        for i, seq in enumerate(self.decoder.tokenizer.batch_decode(decoder_output.sequences)):
             seq = seq.replace(self.decoder.tokenizer.eos_token, "").replace(self.decoder.tokenizer.pad_token, "")
             seq = re.sub(r"<.*?>", "", seq, count=1).strip()  # remove first task start token
+            logger.debug(f"Generated sequence {i}: {seq[:100]}...")  # Log first 100 chars
             if return_json:
-                output["predictions"].append(self.token2json(seq))
+                try:
+                    json_output = self.token2json(seq)
+                    output["predictions"].append(json_output)
+                    logger.debug(f"Converted to JSON: {json_output}")
+                except Exception as e:
+                    logger.error(f"Error converting sequence to JSON: {e}")
+                    output["predictions"].append({"error": str(e), "raw_sequence": seq})
             else:
                 output["predictions"].append(seq)
 
@@ -494,6 +518,7 @@ class DonutModel(PreTrainedModel):
                 "cross_attentions": decoder_output.cross_attentions,
             }
 
+        logger.debug(f"Inference completed. Generated {len(output['predictions'])} predictions")
         return output
 
     def json2token(self, obj: Any, update_special_tokens_for_json_key: bool = True, sort_json_key: bool = True):

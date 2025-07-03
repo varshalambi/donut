@@ -4,6 +4,7 @@ Copyright (c) 2022-present NAVER Corp.
 MIT License
 """
 import json
+import logging
 import os
 import random
 from collections import defaultdict
@@ -16,6 +17,11 @@ from nltk import edit_distance
 from torch.utils.data import Dataset
 from transformers.modeling_utils import PreTrainedModel
 from zss import Node
+
+
+def get_logger():
+    """Get the logger instance for dataset operations"""
+    return logging.getLogger('donut_training')
 
 
 def save_json(write_path: Union[str, bytes, os.PathLike], save_obj: Any):
@@ -52,6 +58,9 @@ class DonutDataset(Dataset):
         sort_json_key: bool = True,
     ):
         super().__init__()
+        
+        self.logger = get_logger()
+        self.logger.info(f"Initializing DonutDataset: {dataset_name_or_path} ({split} split)")
 
         self.donut_model = donut_model
         self.max_length = max_length
@@ -61,18 +70,28 @@ class DonutDataset(Dataset):
         self.prompt_end_token = prompt_end_token if prompt_end_token else task_start_token
         self.sort_json_key = sort_json_key
 
+        self.logger.info(f"Loading dataset from: {dataset_name_or_path}")
         self.dataset = load_dataset(dataset_name_or_path, split=self.split)
         self.dataset_length = len(self.dataset)
+        self.logger.info(f"Dataset loaded successfully. Number of samples: {self.dataset_length}")
 
+        self.logger.info("Processing ground truth token sequences...")
         self.gt_token_sequences = []
-        for sample in self.dataset:
+        processed_count = 0
+        
+        for i, sample in enumerate(self.dataset):
+            if i % 1000 == 0 and i > 0:
+                self.logger.debug(f"Processing sample {i}/{self.dataset_length}")
+                
             ground_truth = json.loads(sample["ground_truth"])
             if "gt_parses" in ground_truth:  # when multiple ground truths are available, e.g., docvqa
                 assert isinstance(ground_truth["gt_parses"], list)
                 gt_jsons = ground_truth["gt_parses"]
+                processed_count += len(gt_jsons)
             else:
                 assert "gt_parse" in ground_truth and isinstance(ground_truth["gt_parse"], dict)
                 gt_jsons = [ground_truth["gt_parse"]]
+                processed_count += 1
 
             self.gt_token_sequences.append(
                 [
@@ -87,8 +106,13 @@ class DonutDataset(Dataset):
                 ]
             )
 
+        self.logger.info(f"Ground truth processing completed. Total JSON objects processed: {processed_count}")
+
+        self.logger.info(f"Adding special tokens: {self.task_start_token}, {self.prompt_end_token}")
         self.donut_model.decoder.add_special_tokens([self.task_start_token, self.prompt_end_token])
         self.prompt_end_token_id = self.donut_model.decoder.tokenizer.convert_tokens_to_ids(self.prompt_end_token)
+        
+        self.logger.info(f"DonutDataset initialization completed for {self.split} split")
 
     def __len__(self) -> int:
         return self.dataset_length

@@ -6,8 +6,10 @@ MIT License
 import argparse
 import datetime
 import json
+import logging
 import os
 import random
+import sys
 from io import BytesIO
 from os.path import basename
 from pathlib import Path
@@ -23,6 +25,93 @@ from sconf import Config
 
 from donut import DonutDataset
 from lightning_module import DonutDataPLModule, DonutModelPLModule
+
+
+def setup_logging(config):
+    """Setup comprehensive logging for training"""
+    log_dir = Path(config.result_path) / config.exp_name / config.exp_version
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create logger
+    logger = logging.getLogger('donut_training')
+    logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers to avoid duplicates
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Console handler with color formatting
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler for detailed logs
+    file_handler = logging.FileHandler(log_dir / 'training.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    
+    # Error file handler
+    error_handler = logging.FileHandler(log_dir / 'errors.log')
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(file_formatter)
+    logger.addHandler(error_handler)
+    
+    return logger
+
+
+@rank_zero_only
+def log_system_info(logger):
+    """Log system information for reproducibility"""
+    logger.info("=" * 60)
+    logger.info("TRAINING STARTED")
+    logger.info("=" * 60)
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"PyTorch version: {torch.__version__}")
+    logger.info(f"PyTorch Lightning version: {pl.__version__}")
+    logger.info(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        logger.info(f"CUDA version: {torch.version.cuda}")
+        logger.info(f"Number of GPUs: {torch.cuda.device_count()}")
+        for i in range(torch.cuda.device_count()):
+            logger.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+    logger.info(f"Platform: {sys.platform}")
+    logger.info(f"Working directory: {os.getcwd()}")
+    logger.info("=" * 60)
+
+
+@rank_zero_only
+def log_config_summary(logger, config):
+    """Log a summary of the configuration"""
+    logger.info("CONFIGURATION SUMMARY")
+    logger.info("-" * 40)
+    
+    # Log key training parameters
+    key_params = [
+        'exp_name', 'exp_version', 'seed', 'max_epochs', 'max_steps',
+        'lr', 'warmup_steps', 'gradient_clip_val', 'train_batch_sizes',
+        'val_batch_sizes', 'num_workers', 'input_size', 'max_length'
+    ]
+    
+    for param in key_params:
+        if hasattr(config, param):
+            logger.info(f"{param}: {getattr(config, param)}")
+    
+    # Log dataset information
+    logger.info(f"Number of datasets: {len(config.dataset_name_or_paths)}")
+    for i, dataset_path in enumerate(config.dataset_name_or_paths):
+        logger.info(f"Dataset {i}: {dataset_path}")
+    
+    logger.info("-" * 40)
 
 
 class CustomCheckpointIO(CheckpointIO):
@@ -41,21 +130,22 @@ class CustomCheckpointIO(CheckpointIO):
 
 
 @rank_zero_only
-def save_config_file(config, path):
+def save_config_file(config, path, logger):
     if not Path(path).exists():
         os.makedirs(path)
     save_path = Path(path) / "config.yaml"
-    print(config.dumps())
+    logger.info(f"Saving config to: {save_path}")
     with open(save_path, "w") as f:
         f.write(config.dumps(modified_color=None, quote_str=True))
-        print(f"Config is saved at {save_path}")
+    logger.info("Config saved successfully")
 
 
 class ProgressBar(pl.callbacks.TQDMProgressBar):
-    def __init__(self, config):
+    def __init__(self, config, logger):
         super().__init__()
         self.enable = True
         self.config = config
+        self.logger = logger
 
     def disable(self):
         self.enable = False
@@ -68,96 +158,128 @@ class ProgressBar(pl.callbacks.TQDMProgressBar):
         return items
 
 
-def set_seed(seed):
+def set_seed(seed, logger):
+    logger.info(f"Setting random seed to: {seed}")
     pytorch_lightning_version = int(pl.__version__[0])
     if pytorch_lightning_version < 2:
         pl.utilities.seed.seed_everything(seed, workers=True)
     else:
         import lightning_fabric
         lightning_fabric.utilities.seed.seed_everything(seed, workers=True)
+    logger.info("Random seed set successfully")
 
 
 def train(config):
-    set_seed(config.get("seed", 42))
-
-    model_module = DonutModelPLModule(config)
-    data_module = DonutDataPLModule(config)
-
-    # add datasets to data_module
-    datasets = {"train": [], "validation": []}
-    for i, dataset_name_or_path in enumerate(config.dataset_name_or_paths):
-        task_name = os.path.basename(dataset_name_or_path)  # e.g., cord-v2, docvqa, rvlcdip, ...
+    # Setup logging first
+    logger = setup_logging(config)
+    
+    try:
+        # Log system information
+        log_system_info(logger)
+        log_config_summary(logger, config)
         
-        # add categorical special tokens (optional)
-        if task_name == "rvlcdip":
-            model_module.model.decoder.add_special_tokens([
-                "<advertisement/>", "<budget/>", "<email/>", "<file_folder/>", 
-                "<form/>", "<handwritten/>", "<invoice/>", "<letter/>", 
-                "<memo/>", "<news_article/>", "<presentation/>", "<questionnaire/>", 
-                "<resume/>", "<scientific_publication/>", "<scientific_report/>", "<specification/>"
-            ])
-        if task_name == "docvqa":
-            model_module.model.decoder.add_special_tokens(["<yes/>", "<no/>"])
+        # Set seed
+        set_seed(config.get("seed", 42), logger)
+        
+        logger.info("Initializing model and data modules...")
+        model_module = DonutModelPLModule(config)
+        data_module = DonutDataPLModule(config)
+        logger.info("Model and data modules initialized successfully")
+
+        # add datasets to data_module
+        logger.info("Setting up datasets...")
+        datasets = {"train": [], "validation": []}
+        for i, dataset_name_or_path in enumerate(config.dataset_name_or_paths):
+            task_name = os.path.basename(dataset_name_or_path)  # e.g., cord-v2, docvqa, rvlcdip, ...
+            logger.info(f"Processing dataset {i+1}/{len(config.dataset_name_or_paths)}: {task_name}")
             
-        for split in ["train", "validation"]:
-            datasets[split].append(
-                DonutDataset(
-                    dataset_name_or_path=dataset_name_or_path,
-                    donut_model=model_module.model,
-                    max_length=config.max_length,
-                    split=split,
-                    task_start_token=config.task_start_tokens[i]
-                    if config.get("task_start_tokens", None)
-                    else f"<s_{task_name}>",
-                    prompt_end_token="<s_answer>" if "docvqa" in dataset_name_or_path else f"<s_{task_name}>",
-                    sort_json_key=config.sort_json_key,
+            # add categorical special tokens (optional)
+            if task_name == "rvlcdip":
+                logger.info("Adding RVL-CDIP special tokens")
+                model_module.model.decoder.add_special_tokens([
+                    "<advertisement/>", "<budget/>", "<email/>", "<file_folder/>", 
+                    "<form/>", "<handwritten/>", "<invoice/>", "<letter/>", 
+                    "<memo/>", "<news_article/>", "<presentation/>", "<questionnaire/>", 
+                    "<resume/>", "<scientific_publication/>", "<scientific_report/>", "<specification/>"
+                ])
+            if task_name == "docvqa":
+                logger.info("Adding DocVQA special tokens")
+                model_module.model.decoder.add_special_tokens(["<yes/>", "<no/>"])
+                
+            for split in ["train", "validation"]:
+                logger.info(f"Creating {split} dataset for {task_name}")
+                datasets[split].append(
+                    DonutDataset(
+                        dataset_name_or_path=dataset_name_or_path,
+                        donut_model=model_module.model,
+                        max_length=config.max_length,
+                        split=split,
+                        task_start_token=config.task_start_tokens[i]
+                        if config.get("task_start_tokens", None)
+                        else f"<s_{task_name}>",
+                        prompt_end_token="<s_answer>" if "docvqa" in dataset_name_or_path else f"<s_{task_name}>",
+                        sort_json_key=config.sort_json_key,
+                    )
                 )
-            )
-            # prompt_end_token is used for ignoring a given prompt in a loss function
-            # for docvqa task, i.e., {"question": {used as a prompt}, "answer": {prediction target}},
-            # set prompt_end_token to "<s_answer>"
-    data_module.train_datasets = datasets["train"]
-    data_module.val_datasets = datasets["validation"]
+                logger.info(f"{split.capitalize()} dataset created for {task_name}")
+                
+        data_module.train_datasets = datasets["train"]
+        data_module.val_datasets = datasets["validation"]
+        logger.info(f"Dataset setup complete. Train datasets: {len(datasets['train'])}, Val datasets: {len(datasets['validation'])}")
 
-    logger = TensorBoardLogger(
-        save_dir=config.result_path,
-        name=config.exp_name,
-        version=config.exp_version,
-        default_hp_metric=False,
-    )
+        # Setup logging and callbacks
+        logger.info("Setting up TensorBoard logger...")
+        logger = TensorBoardLogger(
+            save_dir=config.result_path,
+            name=config.exp_name,
+            version=config.exp_version,
+            default_hp_metric=False,
+        )
 
-    lr_callback = LearningRateMonitor(logging_interval="step")
+        logger.info("Setting up callbacks...")
+        lr_callback = LearningRateMonitor(logging_interval="step")
 
-    checkpoint_callback = ModelCheckpoint(
-        monitor="val_metric",
-        dirpath=Path(config.result_path) / config.exp_name / config.exp_version,
-        filename="artifacts",
-        save_top_k=1,
-        save_last=False,
-        mode="min",
-    )
+        checkpoint_callback = ModelCheckpoint(
+            monitor="val_metric",
+            dirpath=Path(config.result_path) / config.exp_name / config.exp_version,
+            filename="artifacts",
+            save_top_k=1,
+            save_last=False,
+            mode="min",
+        )
 
-    bar = ProgressBar(config)
+        bar = ProgressBar(config, logger)
 
-    custom_ckpt = CustomCheckpointIO()
-    trainer = pl.Trainer(
-        num_nodes=config.get("num_nodes", 1),
-        devices=torch.cuda.device_count(),
-        strategy="ddp",
-        accelerator="gpu",
-        plugins=custom_ckpt,
-        max_epochs=config.max_epochs,
-        max_steps=config.max_steps,
-        val_check_interval=config.val_check_interval,
-        check_val_every_n_epoch=config.check_val_every_n_epoch,
-        gradient_clip_val=config.gradient_clip_val,
-        precision=16,
-        num_sanity_val_steps=0,
-        logger=logger,
-        callbacks=[lr_callback, checkpoint_callback, bar],
-    )
+        custom_ckpt = CustomCheckpointIO()
+        
+        # Setup trainer
+        logger.info("Configuring PyTorch Lightning trainer...")
+        trainer = pl.Trainer(
+            num_nodes=config.get("num_nodes", 1),
+            devices=torch.cuda.device_count(),
+            strategy="ddp",
+            accelerator="gpu",
+            plugins=custom_ckpt,
+            max_epochs=config.max_epochs,
+            max_steps=config.max_steps,
+            val_check_interval=config.val_check_interval,
+            check_val_every_n_epoch=config.check_val_every_n_epoch,
+            gradient_clip_val=config.gradient_clip_val,
+            precision=16,
+            num_sanity_val_steps=0,
+            logger=logger,
+            callbacks=[lr_callback, checkpoint_callback, bar],
+        )
+        logger.info("Trainer configured successfully")
 
-    trainer.fit(model_module, data_module, ckpt_path=config.get("resume_from_checkpoint_path", None))
+        # Start training
+        logger.info("Starting training...")
+        trainer.fit(model_module, data_module, ckpt_path=config.get("resume_from_checkpoint_path", None))
+        logger.info("Training completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"Training failed with error: {str(e)}", exc_info=True)
+        raise
 
 
 if __name__ == "__main__":
@@ -172,5 +294,8 @@ if __name__ == "__main__":
     config.exp_name = basename(args.config).split(".")[0]
     config.exp_version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") if not args.exp_version else args.exp_version
 
-    save_config_file(config, Path(config.result_path) / config.exp_name / config.exp_version)
+    # Setup basic logging for config saving
+    basic_logger = setup_logging(config)
+    save_config_file(config, Path(config.result_path) / config.exp_name / config.exp_version, basic_logger)
+    
     train(config)
