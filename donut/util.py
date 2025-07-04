@@ -7,9 +7,11 @@ import json
 import logging
 import os
 import random
-from collections import defaultdict
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
+import numpy as np
 import torch
 import zss
 from datasets import load_dataset
@@ -18,6 +20,11 @@ from torch.utils.data import Dataset
 from transformers.modeling_utils import PreTrainedModel
 from zss import Node
 
+from .model import DonutModel
+
+# Compile regex patterns once for efficiency
+TAG_CLEANUP_PATTERN = re.compile(r"(?:(?<=>) | (?=</s_))")
+HTML_TAG_PATTERN = re.compile(r"<.*?>")
 
 def get_logger():
     """Get the logger instance for dataset operations"""
@@ -26,7 +33,7 @@ def get_logger():
 
 def save_json(write_path: Union[str, bytes, os.PathLike], save_obj: Any):
     with open(write_path, "w") as f:
-        json.dump(save_obj, f)
+        json.dump(save_obj, f, indent=2, ensure_ascii=False)
 
 
 def load_json(json_path: Union[str, bytes, os.PathLike]):
@@ -56,6 +63,7 @@ class DonutDataset(Dataset):
         task_start_token: str = "<s>",
         prompt_end_token: str = None,
         sort_json_key: bool = True,
+        lazy_loading: bool = True,  # New parameter for optimization
     ):
         super().__init__()
         
@@ -69,50 +77,97 @@ class DonutDataset(Dataset):
         self.task_start_token = task_start_token
         self.prompt_end_token = prompt_end_token if prompt_end_token else task_start_token
         self.sort_json_key = sort_json_key
+        self.lazy_loading = lazy_loading
 
         self._logger.info(f"Loading dataset from: {dataset_name_or_path}")
         self.dataset = load_dataset(dataset_name_or_path, split=self.split)
         self.dataset_length = len(self.dataset)
         self._logger.info(f"Dataset loaded successfully. Number of samples: {self.dataset_length}")
 
-        self._logger.info("Processing ground truth token sequences...")
-        self.gt_token_sequences = []
-        processed_count = 0
+        # Initialize token cache for lazy loading
+        self._gt_token_cache = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
         
-        for i, sample in enumerate(self.dataset):
-            if i % 1000 == 0 and i > 0:
-                self._logger.debug(f"Processing sample {i}/{self.dataset_length}")
-                
-            ground_truth = json.loads(sample["ground_truth"])
-            if "gt_parses" in ground_truth:  # when multiple ground truths are available, e.g., docvqa
-                assert isinstance(ground_truth["gt_parses"], list)
-                gt_jsons = ground_truth["gt_parses"]
-                processed_count += len(gt_jsons)
-            else:
-                assert "gt_parse" in ground_truth and isinstance(ground_truth["gt_parse"], dict)
-                gt_jsons = [ground_truth["gt_parse"]]
-                processed_count += 1
+        if not self.lazy_loading:
+            # Legacy behavior - pre-compute all tokens (memory intensive)
+            self._logger.info("Processing ground truth token sequences (eager loading)...")
+            self.gt_token_sequences = []
+            processed_count = 0
+            
+            for i, sample in enumerate(self.dataset):
+                if i % 1000 == 0 and i > 0:
+                    self._logger.debug(f"Processing sample {i}/{self.dataset_length}")
+                    
+                ground_truth = json.loads(sample["ground_truth"])
+                if "gt_parses" in ground_truth:  # when multiple ground truths are available, e.g., docvqa
+                    assert isinstance(ground_truth["gt_parses"], list)
+                    gt_jsons = ground_truth["gt_parses"]
+                    processed_count += len(gt_jsons)
+                else:
+                    assert "gt_parse" in ground_truth and isinstance(ground_truth["gt_parse"], dict)
+                    gt_jsons = [ground_truth["gt_parse"]]
+                    processed_count += 1
 
-            self.gt_token_sequences.append(
-                [
-                    task_start_token
-                    + self.donut_model.json2token(
-                        gt_json,
-                        update_special_tokens_for_json_key=self.split == "train",
-                        sort_json_key=self.sort_json_key,
-                    )
-                    + self.donut_model.decoder.tokenizer.eos_token
-                    for gt_json in gt_jsons  # load json from list of json
-                ]
-            )
+                self.gt_token_sequences.append(
+                    [
+                        task_start_token
+                        + self.donut_model.json2token(
+                            gt_json,
+                            update_special_tokens_for_json_key=self.split == "train",
+                            sort_json_key=self.sort_json_key,
+                        )
+                        + self.donut_model.decoder.tokenizer.eos_token
+                        for gt_json in gt_jsons  # load json from list of json
+                    ]
+                )
 
-        self._logger.info(f"Ground truth processing completed. Total JSON objects processed: {processed_count}")
+            self._logger.info(f"Ground truth processing completed. Total JSON objects processed: {processed_count}")
+        else:
+            self._logger.info("Using lazy loading for ground truth token sequences (memory efficient)")
+            self.gt_token_sequences = None  # Will be computed on-demand
 
         self._logger.info(f"Adding special tokens: {self.task_start_token}, {self.prompt_end_token}")
         self.donut_model.decoder.add_special_tokens([self.task_start_token, self.prompt_end_token])
         self.prompt_end_token_id = self.donut_model.decoder.tokenizer.convert_tokens_to_ids(self.prompt_end_token)
         
         self._logger.info(f"DonutDataset initialization completed for {self.split} split")
+
+    def _get_gt_token_sequences(self, idx: int) -> List[str]:
+        """Get ground truth token sequences for a specific index with caching"""
+        if idx in self._gt_token_cache:
+            self._cache_hits += 1
+            return self._gt_token_cache[idx]
+        
+        self._cache_misses += 1
+        
+        # Compute token sequences for this index
+        sample = self.dataset[idx]
+        ground_truth = json.loads(sample["ground_truth"])
+        
+        if "gt_parses" in ground_truth:  # when multiple ground truths are available, e.g., docvqa
+            assert isinstance(ground_truth["gt_parses"], list)
+            gt_jsons = ground_truth["gt_parses"]
+        else:
+            assert "gt_parse" in ground_truth and isinstance(ground_truth["gt_parse"], dict)
+            gt_jsons = [ground_truth["gt_parse"]]
+
+        token_sequences = [
+            self.task_start_token
+            + self.donut_model.json2token(
+                gt_json,
+                update_special_tokens_for_json_key=self.split == "train",
+                sort_json_key=self.sort_json_key,
+            )
+            + self.donut_model.decoder.tokenizer.eos_token
+            for gt_json in gt_jsons
+        ]
+        
+        # Cache the result (limit cache size to prevent memory issues)
+        if len(self._gt_token_cache) < 10000:  # Limit cache to 10K entries
+            self._gt_token_cache[idx] = token_sequences
+        
+        return token_sequences
 
     def __len__(self) -> int:
         return self.dataset_length
@@ -132,8 +187,13 @@ class DonutDataset(Dataset):
         # input_tensor
         input_tensor = self.donut_model.encoder.prepare_input(sample["image"], random_padding=self.split == "train")
 
-        # input_ids
-        processed_parse = random.choice(self.gt_token_sequences[idx])  # can be more than one, e.g., DocVQA Task 1
+        # input_ids - use lazy loading if enabled
+        if self.lazy_loading:
+            gt_token_sequences = self._get_gt_token_sequences(idx)
+        else:
+            gt_token_sequences = self.gt_token_sequences[idx]
+            
+        processed_parse = random.choice(gt_token_sequences)  # can be more than one, e.g., DocVQA Task 1
         input_ids = self.donut_model.decoder.tokenizer(
             processed_parse,
             add_special_tokens=False,
@@ -157,6 +217,15 @@ class DonutDataset(Dataset):
                 input_ids == self.prompt_end_token_id
             ).sum()  # return prompt end index instead of target output labels
             return input_tensor, input_ids, prompt_end_index, processed_parse
+
+    def get_cache_stats(self) -> Dict[str, int]:
+        """Get cache statistics for monitoring"""
+        return {
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "cache_size": len(self._gt_token_cache),
+            "hit_rate": self._cache_hits / max(1, self._cache_hits + self._cache_misses)
+        }
 
 
 class JSONParseEvaluator:
@@ -257,9 +326,9 @@ class JSONParseEvaluator:
                     if item:
                         new_data.append(item)
             else:
-                new_data = [str(item).strip() for item in data if type(item) in {str, int, float} and str(item).strip()]
+                new_data = sorted(data)
         else:
-            new_data = [str(data).strip()]
+            new_data = data
 
         return new_data
 

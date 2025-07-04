@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import sys
+import time
 from io import BytesIO
 from os.path import basename
 from pathlib import Path
@@ -25,6 +26,43 @@ from sconf import Config
 
 from donut import DonutDataset
 from lightning_module import DonutDataPLModule, DonutModelPLModule
+
+
+class PerformanceMonitor:
+    """Monitor training performance and provide insights"""
+    
+    def __init__(self, logger):
+        self.logger = logger
+        self.start_time = None
+        self.epoch_times = []
+        self.batch_times = []
+        self.memory_usage = []
+        
+    def start_training(self):
+        self.start_time = time.time()
+        self.logger.info("⏱️  Performance monitoring started")
+        
+    def log_epoch_time(self, epoch, epoch_time):
+        self.epoch_times.append(epoch_time)
+        avg_epoch_time = np.mean(self.epoch_times)
+        self.logger.info(f"⏱️  Epoch {epoch} took {epoch_time:.2f}s (avg: {avg_epoch_time:.2f}s)")
+        
+    def log_memory_usage(self):
+        if torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+            memory_reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+            self.logger.info(f"💾 GPU Memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
+            
+    def end_training(self):
+        if self.start_time:
+            total_time = time.time() - self.start_time
+            self.logger.info(f"⏱️  Total training time: {total_time:.2f}s ({total_time/3600:.2f}h)")
+            
+            if self.epoch_times:
+                avg_epoch = np.mean(self.epoch_times)
+                self.logger.info(f"📊 Average epoch time: {avg_epoch:.2f}s")
+                self.logger.info(f"📊 Fastest epoch: {min(self.epoch_times):.2f}s")
+                self.logger.info(f"📊 Slowest epoch: {max(self.epoch_times):.2f}s")
 
 
 def setup_logging(config):
@@ -84,6 +122,9 @@ def log_system_info(logger):
         logger.info(f"  GPUs: {torch.cuda.device_count()}")
         for i in range(torch.cuda.device_count()):
             logger.info(f"    GPU {i}: {torch.cuda.get_device_name(i)}")
+            # Log GPU memory info
+            memory_total = torch.cuda.get_device_properties(i).total_memory / 1024**3
+            logger.info(f"      Memory: {memory_total:.1f}GB")
     logger.info(f"💻 Platform: {sys.platform}")
     logger.info(f"📁 Working Dir: {os.getcwd()}")
     logger.info("=" * 60)
@@ -123,6 +164,13 @@ def log_config_summary(logger, config):
         dataset_name = os.path.basename(dataset_path)
         logger.info(f"    Dataset {i}: {dataset_name}")
     
+    # Performance recommendations
+    logger.info("─" * 40)
+    logger.info("💡 PERFORMANCE RECOMMENDATIONS:")
+    if config.num_workers < 4:
+        logger.info("  ⚠️  Consider increasing num_workers for better data loading")
+    if torch.cuda.is_available() and config.train_batch_sizes[0] < 4:
+        logger.info("  ⚠️  Consider increasing batch size for better GPU utilization")
     logger.info("─" * 40)
 
 
@@ -184,6 +232,9 @@ def set_seed(seed, logger):
 def train(config):
     # Setup logging first
     logger = setup_logging(config)
+    
+    # Initialize performance monitor
+    perf_monitor = PerformanceMonitor(logger)
     
     try:
         # Log system information
@@ -287,7 +338,15 @@ def train(config):
         # Start training
         logger.info("🎯 Starting training...")
         logger.info("─" * 60)
+        
+        # Start performance monitoring
+        perf_monitor.start_training()
+        
         trainer.fit(model_module, data_module, ckpt_path=config.get("resume_from_checkpoint_path", None))
+        
+        # End performance monitoring
+        perf_monitor.end_training()
+        
         logger.info("─" * 60)
         logger.info("🎉 Training completed successfully!")
         

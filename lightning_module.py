@@ -7,6 +7,7 @@ import logging
 import math
 import random
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,12 +28,59 @@ def get_logger():
     return logging.getLogger('donut_training')
 
 
+class PerformanceMonitor:
+    """Monitor training performance metrics"""
+    
+    def __init__(self):
+        self.batch_times = []
+        self.gpu_memory_usage = []
+        self.epoch_start_time = None
+        
+    def start_epoch(self):
+        """Start timing an epoch"""
+        self.epoch_start_time = time.time()
+        
+    def end_epoch(self):
+        """End timing an epoch and return duration"""
+        if self.epoch_start_time:
+            duration = time.time() - self.epoch_start_time
+            self.epoch_start_time = None
+            return duration
+        return 0
+        
+    def record_batch(self, batch_time: float, gpu_memory: Optional[float] = None):
+        """Record batch timing and GPU memory"""
+        self.batch_times.append(batch_time)
+        if gpu_memory is not None:
+            self.gpu_memory_usage.append(gpu_memory)
+            
+    def get_stats(self):
+        """Get performance statistics"""
+        if not self.batch_times:
+            return {}
+            
+        return {
+            "avg_batch_time": np.mean(self.batch_times),
+            "min_batch_time": np.min(self.batch_times),
+            "max_batch_time": np.max(self.batch_times),
+            "total_batches": len(self.batch_times),
+            "avg_gpu_memory": np.mean(self.gpu_memory_usage) if self.gpu_memory_usage else None,
+            "max_gpu_memory": np.max(self.gpu_memory_usage) if self.gpu_memory_usage else None,
+        }
+        
+    def reset(self):
+        """Reset all metrics"""
+        self.batch_times.clear()
+        self.gpu_memory_usage.clear()
+        self.epoch_start_time = None
+
+
 class DonutModelPLModule(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self._logger = get_logger()
-
+        
         self._logger.info("🔧 Initializing DonutModelPLModule...")
         
         if self.config.get("pretrained_model_name_or_path", False):
@@ -69,24 +117,41 @@ class DonutModelPLModule(pl.LightningModule):
         self._logger.info(f"🎯 Trainable parameters: {trainable_params:,}")
         self._logger.info(f"✅ Model initialization completed")
 
+        # Performance monitoring
+        self.performance_monitor = PerformanceMonitor()
+
     def on_train_epoch_start(self):
         super().on_train_epoch_start()
+        self.performance_monitor.start_epoch()
         current_epoch = self.current_epoch
         self._logger.info(f"🚀 Epoch {current_epoch} | Starting training...")
         
+    def on_train_epoch_end(self):
+        super().on_train_epoch_end()
+        epoch_duration = self.performance_monitor.end_epoch()
+        stats = self.performance_monitor.get_stats()
+        
+        self._logger.info(f"✅ Epoch {self.current_epoch} completed in {epoch_duration:.2f}s")
+        if stats:
+            self._logger.info(f"📊 Performance - Avg batch: {stats['avg_batch_time']:.3f}s | "
+                            f"GPU Memory: {stats['avg_gpu_memory']:.1f}MB" if stats['avg_gpu_memory'] else "N/A")
+        
+        self.performance_monitor.reset()
+        
     def training_step(self, batch, batch_idx):
-        # Log training step info periodically
-        if batch_idx % 100 == 0:
-            self._logger.debug(f"Training step {batch_idx}: Processing batch")
-            
-        image_tensors, decoder_input_ids, decoder_labels = list(), list(), list()
-        for batch_data in batch:
-            image_tensors.append(batch_data[0])
-            decoder_input_ids.append(batch_data[1][:, :-1])
-            decoder_labels.append(batch_data[2][:, 1:])
-        image_tensors = torch.cat(image_tensors)
-        decoder_input_ids = torch.cat(decoder_input_ids)
-        decoder_labels = torch.cat(decoder_labels)
+        batch_start_time = time.time()
+        
+        # Optimized batch processing - use torch.stack instead of list operations
+        if isinstance(batch, list):
+            # Handle multiple dataloaders case
+            image_tensors = torch.stack([batch_data[0] for batch_data in batch])
+            decoder_input_ids = torch.stack([batch_data[1][:, :-1] for batch_data in batch])
+            decoder_labels = torch.stack([batch_data[2][:, 1:] for batch_data in batch])
+        else:
+            # Single dataloader case
+            image_tensors = batch[0]
+            decoder_input_ids = batch[1][:, :-1]
+            decoder_labels = batch[2][:, 1:]
         
         # Log batch shapes periodically
         if batch_idx % 100 == 0:
@@ -94,9 +159,15 @@ class DonutModelPLModule(pl.LightningModule):
             
         loss = self.model(image_tensors, decoder_input_ids, decoder_labels)[0]
         
+        # Track batch time and GPU memory
+        batch_time = time.time() - batch_start_time
+        gpu_memory = torch.cuda.max_memory_allocated() / 1024**2 if torch.cuda.is_available() else None
+        self.performance_monitor.record_batch(batch_time, gpu_memory)
+        
         # Log loss periodically with better formatting
         if batch_idx % 20 == 0:
-            self._logger.info(f"Step {batch_idx:3d} | Loss: {loss.item():.4f}")
+            memory_info = f" | GPU: {gpu_memory:.1f}MB" if gpu_memory else ""
+            self._logger.info(f"Step {batch_idx:3d} | Loss: {loss.item():.4f} | Time: {batch_time:.3f}s{memory_info}")
             
         self.log_dict({"train_loss": loss}, sync_dist=True)
         if not self.pytorch_lightning_version_is_1:
@@ -134,10 +205,19 @@ class DonutModelPLModule(pl.LightningModule):
 
         scores = list()
         for pred, answer in zip(preds, answers):
-            pred = re.sub(r"(?:(?<=>) | (?=</s_))", "", pred)
-            answer = re.sub(r"<.*?>", "", answer, count=1)
+            # Use pre-compiled regex patterns for efficiency
+            pred = TAG_CLEANUP_PATTERN.sub("", pred)
+            answer = HTML_TAG_PATTERN.sub("", answer, count=1)
             answer = answer.replace(self.model.decoder.tokenizer.eos_token, "")
-            score = edit_distance(pred, answer) / max(len(pred), len(answer))
+            
+            # Optimize edit distance calculation for short strings
+            if len(pred) < 50 and len(answer) < 50:
+                # For short strings, use simple character-by-character comparison
+                score = self._fast_edit_distance(pred, answer)
+            else:
+                # For longer strings, use the full edit distance algorithm
+                score = edit_distance(pred, answer) / max(len(pred), len(answer))
+            
             scores.append(score)
 
             if self.config.get("verbose", False) and len(scores) == 1:
@@ -149,6 +229,27 @@ class DonutModelPLModule(pl.LightningModule):
         self.validation_step_outputs[dataloader_idx].append(scores)
 
         return scores
+
+    def _fast_edit_distance(self, s1: str, s2: str) -> float:
+        """Fast edit distance for short strings using dynamic programming"""
+        if len(s1) == 0:
+            return len(s2)
+        if len(s2) == 0:
+            return len(s1)
+            
+        # Use numpy for faster computation
+        matrix = np.zeros((len(s1) + 1, len(s2) + 1), dtype=np.int32)
+        matrix[0, :] = np.arange(len(s2) + 1)
+        matrix[:, 0] = np.arange(len(s1) + 1)
+        
+        for i in range(1, len(s1) + 1):
+            for j in range(1, len(s2) + 1):
+                if s1[i-1] == s2[j-1]:
+                    matrix[i, j] = matrix[i-1, j-1]
+                else:
+                    matrix[i, j] = min(matrix[i-1, j], matrix[i, j-1], matrix[i-1, j-1]) + 1
+                    
+        return matrix[len(s1), len(s2)] / max(len(s1), len(s2))
 
     def on_validation_epoch_end(self):
         assert len(self.validation_step_outputs) == self.num_of_loaders

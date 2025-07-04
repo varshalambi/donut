@@ -111,32 +111,56 @@ class SwinEncoder(nn.Module):
     def prepare_input(self, img: PIL.Image.Image, random_padding: bool = False) -> torch.Tensor:
         """
         Convert PIL Image to tensor according to specified input_size after following steps below:
-            - resize
+            - resize (optimized to avoid double resizing)
             - rotate (if align_long_axis is True and image is not aligned longer axis with canvas)
             - pad
         """
         img = img.convert("RGB")
+        
+        # Optimize rotation check - only rotate if necessary
         if self.align_long_axis and (
             (self.input_size[0] > self.input_size[1] and img.width > img.height)
             or (self.input_size[0] < self.input_size[1] and img.width < img.height)
         ):
             img = rotate(img, angle=-90, expand=True)
-        img = resize(img, min(self.input_size))
-        img.thumbnail((self.input_size[1], self.input_size[0]))
-        delta_width = self.input_size[1] - img.width
-        delta_height = self.input_size[0] - img.height
+        
+        # Optimized resizing - single resize operation
+        target_width, target_height = self.input_size[1], self.input_size[0]
+        
+        # Calculate optimal resize dimensions to maintain aspect ratio
+        img_ratio = img.width / img.height
+        target_ratio = target_width / target_height
+        
+        if img_ratio > target_ratio:
+            # Image is wider than target - fit to width
+            new_width = target_width
+            new_height = int(target_width / img_ratio)
+        else:
+            # Image is taller than target - fit to height
+            new_height = target_height
+            new_width = int(target_height * img_ratio)
+        
+        # Single resize operation
+        img = resize(img, (new_height, new_width))
+        
+        # Calculate padding
+        delta_width = target_width - img.width
+        delta_height = target_height - img.height
+        
         if random_padding:
             pad_width = np.random.randint(low=0, high=delta_width + 1)
             pad_height = np.random.randint(low=0, high=delta_height + 1)
         else:
             pad_width = delta_width // 2
             pad_height = delta_height // 2
+            
         padding = (
             pad_width,
             pad_height,
             delta_width - pad_width,
             delta_height - pad_height,
         )
+        
         return self.to_tensor(ImageOps.expand(img, padding))
 
 
