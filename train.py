@@ -241,7 +241,7 @@ def train(config):
 
         # Setup logging and callbacks
         logger.info("📊 Setting up TensorBoard logger...")
-        logger = TensorBoardLogger(
+        tensorboard_logger = TensorBoardLogger(
             save_dir=config.result_path,
             name=config.exp_name,
             version=config.exp_version,
@@ -279,7 +279,7 @@ def train(config):
             gradient_clip_val=config.gradient_clip_val,
             precision=16,
             num_sanity_val_steps=0,
-            logger=logger,
+            logger=tensorboard_logger,
             callbacks=[lr_callback, checkpoint_callback, bar],
         )
         logger.info("✅ Trainer configured successfully")
