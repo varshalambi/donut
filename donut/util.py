@@ -59,8 +59,8 @@ class DonutDataset(Dataset):
     ):
         super().__init__()
         
-        self.logger = get_logger()
-        self.logger.info(f"Initializing DonutDataset: {dataset_name_or_path} ({split} split)")
+        self._logger = get_logger()
+        self._logger.info(f"Initializing DonutDataset: {dataset_name_or_path} ({split} split)")
 
         self.donut_model = donut_model
         self.max_length = max_length
@@ -70,18 +70,18 @@ class DonutDataset(Dataset):
         self.prompt_end_token = prompt_end_token if prompt_end_token else task_start_token
         self.sort_json_key = sort_json_key
 
-        self.logger.info(f"Loading dataset from: {dataset_name_or_path}")
+        self._logger.info(f"Loading dataset from: {dataset_name_or_path}")
         self.dataset = load_dataset(dataset_name_or_path, split=self.split)
         self.dataset_length = len(self.dataset)
-        self.logger.info(f"Dataset loaded successfully. Number of samples: {self.dataset_length}")
+        self._logger.info(f"Dataset loaded successfully. Number of samples: {self.dataset_length}")
 
-        self.logger.info("Processing ground truth token sequences...")
+        self._logger.info("Processing ground truth token sequences...")
         self.gt_token_sequences = []
         processed_count = 0
         
         for i, sample in enumerate(self.dataset):
             if i % 1000 == 0 and i > 0:
-                self.logger.debug(f"Processing sample {i}/{self.dataset_length}")
+                self._logger.debug(f"Processing sample {i}/{self.dataset_length}")
                 
             ground_truth = json.loads(sample["ground_truth"])
             if "gt_parses" in ground_truth:  # when multiple ground truths are available, e.g., docvqa
@@ -106,13 +106,13 @@ class DonutDataset(Dataset):
                 ]
             )
 
-        self.logger.info(f"Ground truth processing completed. Total JSON objects processed: {processed_count}")
+        self._logger.info(f"Ground truth processing completed. Total JSON objects processed: {processed_count}")
 
-        self.logger.info(f"Adding special tokens: {self.task_start_token}, {self.prompt_end_token}")
+        self._logger.info(f"Adding special tokens: {self.task_start_token}, {self.prompt_end_token}")
         self.donut_model.decoder.add_special_tokens([self.task_start_token, self.prompt_end_token])
         self.prompt_end_token_id = self.donut_model.decoder.tokenizer.convert_tokens_to_ids(self.prompt_end_token)
         
-        self.logger.info(f"DonutDataset initialization completed for {self.split} split")
+        self._logger.info(f"DonutDataset initialization completed for {self.split} split")
 
     def __len__(self) -> int:
         return self.dataset_length
