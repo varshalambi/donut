@@ -124,7 +124,7 @@ class SwinEncoder(nn.Module):
         ):
             img = rotate(img, angle=-90, expand=True)
         
-        # Optimized resizing - single resize operation
+        # Optimized resizing - single resize operation with aspect ratio preservation
         target_width, target_height = self.input_size[1], self.input_size[0]
         
         # Calculate optimal resize dimensions to maintain aspect ratio
@@ -143,7 +143,7 @@ class SwinEncoder(nn.Module):
         # Single resize operation
         img = resize(img, (new_height, new_width))
         
-        # Calculate padding
+        # Calculate padding efficiently
         delta_width = target_width - img.width
         delta_height = target_height - img.height
         
@@ -161,6 +161,7 @@ class SwinEncoder(nn.Module):
             delta_height - pad_height,
         )
         
+        # Use ImageOps.expand for efficient padding
         return self.to_tensor(ImageOps.expand(img, padding))
 
 

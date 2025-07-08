@@ -1,433 +1,245 @@
 """
-Donut
-Copyright (c) 2022-present NAVER Corp.
-MIT License
+Utility functions for Donut model training and inference
 """
-import json
 import logging
-import os
-import random
-import re
-from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
-
-import numpy as np
+import time
 import torch
-import zss
-from datasets import load_dataset
-from nltk import edit_distance
-from torch.utils.data import Dataset
-from transformers.modeling_utils import PreTrainedModel
-from zss import Node
-
-from .model import DonutModel
-
-# Compile regex patterns once for efficiency
-TAG_CLEANUP_PATTERN = re.compile(r"(?:(?<=>) | (?=</s_))")
-HTML_TAG_PATTERN = re.compile(r"<.*?>")
-
-def get_logger():
-    """Get the logger instance for dataset operations"""
-    return logging.getLogger('donut_training')
+import numpy as np
+from typing import Dict, Optional, List
+from pathlib import Path
 
 
-def save_json(write_path: Union[str, bytes, os.PathLike], save_obj: Any):
-    with open(write_path, "w") as f:
-        json.dump(save_obj, f, indent=2, ensure_ascii=False)
-
-
-def load_json(json_path: Union[str, bytes, os.PathLike]):
-    with open(json_path, "r") as f:
-        return json.load(f)
-
-
-class DonutDataset(Dataset):
-    """
-    DonutDataset which is saved in huggingface datasets format. (see details in https://huggingface.co/docs/datasets)
-    Each row, consists of image path(png/jpg/jpeg) and gt data (json/jsonl/txt),
-    and it will be converted into input_tensor(vectorized image) and input_ids(tokenized string)
-
-    Args:
-        dataset_name_or_path: name of dataset (available at huggingface.co/datasets) or the path containing image files and metadata.jsonl
-        ignore_id: ignore_index for torch.nn.CrossEntropyLoss
-        task_start_token: the special token to be fed to the decoder to conduct the target task
-    """
-
-    def __init__(
-        self,
-        dataset_name_or_path: str,
-        donut_model: PreTrainedModel,
-        max_length: int,
-        split: str = "train",
-        ignore_id: int = -100,
-        task_start_token: str = "<s>",
-        prompt_end_token: str = None,
-        sort_json_key: bool = True,
-        lazy_loading: bool = True,  # New parameter for optimization
-    ):
-        super().__init__()
+class PerformanceMonitor:
+    """Centralized performance monitoring for Donut training and inference"""
+    
+    def __init__(self, name: str = "donut", logger: Optional[logging.Logger] = None):
+        self.name = name
+        self.logger = logger or logging.getLogger('donut')
+        self.reset()
         
-        self._logger = get_logger()
-        self._logger.info(f"Initializing DonutDataset: {dataset_name_or_path} ({split} split)")
-
-        self.donut_model = donut_model
-        self.max_length = max_length
-        self.split = split
-        self.ignore_id = ignore_id
-        self.task_start_token = task_start_token
-        self.prompt_end_token = prompt_end_token if prompt_end_token else task_start_token
-        self.sort_json_key = sort_json_key
-        self.lazy_loading = lazy_loading
-
-        self._logger.info(f"Loading dataset from: {dataset_name_or_path}")
-        self.dataset = load_dataset(dataset_name_or_path, split=self.split)
-        self.dataset_length = len(self.dataset)
-        self._logger.info(f"Dataset loaded successfully. Number of samples: {self.dataset_length}")
-
-        # Initialize token cache for lazy loading
-        self._gt_token_cache = {}
-        self._cache_hits = 0
-        self._cache_misses = 0
+    def reset(self):
+        """Reset all metrics"""
+        self.start_time = None
+        self.epoch_times = []
+        self.batch_times = []
+        self.gpu_memory_usage = []
+        self.epoch_start_time = None
         
-        if not self.lazy_loading:
-            # Legacy behavior - pre-compute all tokens (memory intensive)
-            self._logger.info("Processing ground truth token sequences (eager loading)...")
-            self.gt_token_sequences = []
-            processed_count = 0
+    def start_training(self):
+        """Start overall training timing"""
+        self.start_time = time.time()
+        self.logger.info(f"⏱️  {self.name} performance monitoring started")
+        
+    def start_epoch(self):
+        """Start timing an epoch"""
+        self.epoch_start_time = time.time()
+        
+    def end_epoch(self, epoch: int) -> float:
+        """End timing an epoch and return duration"""
+        if self.epoch_start_time:
+            duration = time.time() - self.epoch_start_time
+            self.epoch_times.append(duration)
+            self.epoch_start_time = None
             
-            for i, sample in enumerate(self.dataset):
-                if i % 1000 == 0 and i > 0:
-                    self._logger.debug(f"Processing sample {i}/{self.dataset_length}")
-                    
-                ground_truth = json.loads(sample["ground_truth"])
-                if "gt_parses" in ground_truth:  # when multiple ground truths are available, e.g., docvqa
-                    assert isinstance(ground_truth["gt_parses"], list)
-                    gt_jsons = ground_truth["gt_parses"]
-                    processed_count += len(gt_jsons)
-                else:
-                    assert "gt_parse" in ground_truth and isinstance(ground_truth["gt_parse"], dict)
-                    gt_jsons = [ground_truth["gt_parse"]]
-                    processed_count += 1
-
-                self.gt_token_sequences.append(
-                    [
-                        task_start_token
-                        + self.donut_model.json2token(
-                            gt_json,
-                            update_special_tokens_for_json_key=self.split == "train",
-                            sort_json_key=self.sort_json_key,
-                        )
-                        + self.donut_model.decoder.tokenizer.eos_token
-                        for gt_json in gt_jsons  # load json from list of json
-                    ]
-                )
-
-            self._logger.info(f"Ground truth processing completed. Total JSON objects processed: {processed_count}")
-        else:
-            self._logger.info("Using lazy loading for ground truth token sequences (memory efficient)")
-            self.gt_token_sequences = None  # Will be computed on-demand
-
-        self._logger.info(f"Adding special tokens: {self.task_start_token}, {self.prompt_end_token}")
-        self.donut_model.decoder.add_special_tokens([self.task_start_token, self.prompt_end_token])
-        self.prompt_end_token_id = self.donut_model.decoder.tokenizer.convert_tokens_to_ids(self.prompt_end_token)
+            avg_epoch_time = np.mean(self.epoch_times)
+            self.logger.info(f"⏱️  Epoch {epoch} took {duration:.2f}s (avg: {avg_epoch_time:.2f}s)")
+            return duration
+        return 0
         
-        self._logger.info(f"DonutDataset initialization completed for {self.split} split")
-
-    def _get_gt_token_sequences(self, idx: int) -> List[str]:
-        """Get ground truth token sequences for a specific index with caching"""
-        if idx in self._gt_token_cache:
-            self._cache_hits += 1
-            return self._gt_token_cache[idx]
-        
-        self._cache_misses += 1
-        
-        # Compute token sequences for this index
-        sample = self.dataset[idx]
-        ground_truth = json.loads(sample["ground_truth"])
-        
-        if "gt_parses" in ground_truth:  # when multiple ground truths are available, e.g., docvqa
-            assert isinstance(ground_truth["gt_parses"], list)
-            gt_jsons = ground_truth["gt_parses"]
-        else:
-            assert "gt_parse" in ground_truth and isinstance(ground_truth["gt_parse"], dict)
-            gt_jsons = [ground_truth["gt_parse"]]
-
-        token_sequences = [
-            self.task_start_token
-            + self.donut_model.json2token(
-                gt_json,
-                update_special_tokens_for_json_key=self.split == "train",
-                sort_json_key=self.sort_json_key,
-            )
-            + self.donut_model.decoder.tokenizer.eos_token
-            for gt_json in gt_jsons
-        ]
-        
-        # Cache the result (limit cache size to prevent memory issues)
-        if len(self._gt_token_cache) < 10000:  # Limit cache to 10K entries
-            self._gt_token_cache[idx] = token_sequences
-        
-        return token_sequences
-
-    def __len__(self) -> int:
-        return self.dataset_length
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Load image from image_path of given dataset_path and convert into input_tensor and labels.
-        Convert gt data into input_ids (tokenized string)
-
-        Returns:
-            input_tensor : preprocessed image
-            input_ids : tokenized gt_data
-            labels : masked labels (model doesn't need to predict prompt and pad token)
-        """
-        sample = self.dataset[idx]
-
-        # input_tensor
-        input_tensor = self.donut_model.encoder.prepare_input(sample["image"], random_padding=self.split == "train")
-
-        # input_ids - use lazy loading if enabled
-        if self.lazy_loading:
-            gt_token_sequences = self._get_gt_token_sequences(idx)
-        else:
-            gt_token_sequences = self.gt_token_sequences[idx]
+    def record_batch(self, batch_time: float, gpu_memory: Optional[float] = None):
+        """Record batch timing and GPU memory"""
+        self.batch_times.append(batch_time)
+        if gpu_memory is not None:
+            self.gpu_memory_usage.append(gpu_memory)
             
-        processed_parse = random.choice(gt_token_sequences)  # can be more than one, e.g., DocVQA Task 1
-        input_ids = self.donut_model.decoder.tokenizer(
-            processed_parse,
-            add_special_tokens=False,
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )["input_ids"].squeeze(0)
-
-        if self.split == "train":
-            labels = input_ids.clone()
-            labels[
-                labels == self.donut_model.decoder.tokenizer.pad_token_id
-            ] = self.ignore_id  # model doesn't need to predict pad token
-            labels[
-                : torch.nonzero(labels == self.prompt_end_token_id).sum() + 1
-            ] = self.ignore_id  # model doesn't need to predict prompt (for VQA)
-            return input_tensor, input_ids, labels
-        else:
-            prompt_end_index = torch.nonzero(
-                input_ids == self.prompt_end_token_id
-            ).sum()  # return prompt end index instead of target output labels
-            return input_tensor, input_ids, prompt_end_index, processed_parse
-
-    def get_cache_stats(self) -> Dict[str, int]:
-        """Get cache statistics for monitoring"""
-        return {
-            "cache_hits": self._cache_hits,
-            "cache_misses": self._cache_misses,
-            "cache_size": len(self._gt_token_cache),
-            "hit_rate": self._cache_hits / max(1, self._cache_hits + self._cache_misses)
+    def log_memory_usage(self):
+        """Log current GPU memory usage"""
+        if torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+            memory_reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+            self.logger.info(f"💾 GPU Memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
+            
+    def get_stats(self) -> Dict:
+        """Get comprehensive performance statistics"""
+        stats = {
+            "total_batches": len(self.batch_times),
+            "total_epochs": len(self.epoch_times),
         }
+        
+        if self.batch_times:
+            stats.update({
+                "avg_batch_time": np.mean(self.batch_times),
+                "min_batch_time": np.min(self.batch_times),
+                "max_batch_time": np.max(self.batch_times),
+            })
+            
+        if self.epoch_times:
+            stats.update({
+                "avg_epoch_time": np.mean(self.epoch_times),
+                "min_epoch_time": np.min(self.epoch_times),
+                "max_epoch_time": np.max(self.epoch_times),
+            })
+            
+        if self.gpu_memory_usage:
+            stats.update({
+                "avg_gpu_memory": np.mean(self.gpu_memory_usage),
+                "max_gpu_memory": np.max(self.gpu_memory_usage),
+            })
+            
+        if self.start_time:
+            stats["total_training_time"] = time.time() - self.start_time
+            
+        return stats
+        
+    def end_training(self):
+        """End training and log final statistics"""
+        if self.start_time:
+            total_time = time.time() - self.start_time
+            stats = self.get_stats()
+            
+            self.logger.info(f"⏱️  {self.name} training completed in {total_time:.2f}s ({total_time/3600:.2f}h)")
+            
+            if stats.get("avg_epoch_time"):
+                self.logger.info(f"📊 Average epoch time: {stats['avg_epoch_time']:.2f}s")
+                self.logger.info(f"📊 Fastest epoch: {stats['min_epoch_time']:.2f}s")
+                self.logger.info(f"📊 Slowest epoch: {stats['max_epoch_time']:.2f}s")
+                
+            if stats.get("avg_batch_time"):
+                self.logger.info(f"📊 Average batch time: {stats['avg_batch_time']:.3f}s")
 
 
-class JSONParseEvaluator:
+def optimize_batch_processing(batch, logger: Optional[logging.Logger] = None):
     """
-    Calculate n-TED(Normalized Tree Edit Distance) based accuracy and F1 accuracy score
+    Optimized batch processing for single or multiple dataloaders
+    
+    Args:
+        batch: Either a tuple (single dataloader) or list of tuples (multiple dataloaders)
+        logger: Optional logger for debugging
+        
+    Returns:
+        tuple: (image_tensors, decoder_input_ids, decoder_labels)
     """
+    if isinstance(batch, list):
+        # Multiple dataloaders - concatenate efficiently
+        all_image_tensors = []
+        all_decoder_input_ids = []
+        all_decoder_labels = []
+        
+        for batch_data in batch:
+            all_image_tensors.append(batch_data[0])
+            all_decoder_input_ids.append(batch_data[1][:, :-1])
+            all_decoder_labels.append(batch_data[2][:, 1:])
+        
+        # Use torch.cat for efficient concatenation
+        image_tensors = torch.cat(all_image_tensors, dim=0)
+        decoder_input_ids = torch.cat(all_decoder_input_ids, dim=0)
+        decoder_labels = torch.cat(all_decoder_labels, dim=0)
+        
+        if logger:
+            logger.debug(f"Multi-dataloader batch shapes - images: {image_tensors.shape}, "
+                        f"input_ids: {decoder_input_ids.shape}, labels: {decoder_labels.shape}")
+    else:
+        # Single dataloader - direct assignment
+        image_tensors = batch[0]
+        decoder_input_ids = batch[1][:, :-1]
+        decoder_labels = batch[2][:, 1:]
+        
+        if logger:
+            logger.debug(f"Single dataloader batch shapes - images: {image_tensors.shape}, "
+                        f"input_ids: {decoder_input_ids.shape}, labels: {decoder_labels.shape}")
+    
+    return image_tensors, decoder_input_ids, decoder_labels
 
-    @staticmethod
-    def flatten(data: dict):
-        """
-        Convert Dictionary into Non-nested Dictionary
-        Example:
-            input(dict)
-                {
-                    "menu": [
-                        {"name" : ["cake"], "count" : ["2"]},
-                        {"name" : ["juice"], "count" : ["1"]},
-                    ]
-                }
-            output(list)
-                [
-                    ("menu.name", "cake"),
-                    ("menu.count", "2"),
-                    ("menu.name", "juice"),
-                    ("menu.count", "1"),
-                ]
-        """
-        flatten_data = list()
 
-        def _flatten(value, key=""):
-            if type(value) is dict:
-                for child_key, child_value in value.items():
-                    _flatten(child_value, f"{key}.{child_key}" if key else child_key)
-            elif type(value) is list:
-                for value_item in value:
-                    _flatten(value_item, key)
-            else:
-                flatten_data.append((key, value))
+def get_gpu_memory_info() -> Dict[str, float]:
+    """Get current GPU memory information in GB"""
+    if not torch.cuda.is_available():
+        return {}
+        
+    return {
+        "allocated": torch.cuda.memory_allocated() / 1024**3,
+        "reserved": torch.cuda.memory_reserved() / 1024**3,
+        "max_allocated": torch.cuda.max_memory_allocated() / 1024**3,
+    }
 
-        _flatten(data)
-        return flatten_data
 
-    @staticmethod
-    def update_cost(node1: Node, node2: Node):
-        """
-        Update cost for tree edit distance.
-        If both are leaf node, calculate string edit distance between two labels (special token '<leaf>' will be ignored).
-        If one of them is leaf node, cost is length of string in leaf node + 1.
-        If neither are leaf node, cost is 0 if label1 is same with label2 othewise 1
-        """
-        label1 = node1.label
-        label2 = node2.label
-        label1_leaf = "<leaf>" in label1
-        label2_leaf = "<leaf>" in label2
-        if label1_leaf == True and label2_leaf == True:
-            return edit_distance(label1.replace("<leaf>", ""), label2.replace("<leaf>", ""))
-        elif label1_leaf == False and label2_leaf == True:
-            return 1 + len(label2.replace("<leaf>", ""))
-        elif label1_leaf == True and label2_leaf == False:
-            return 1 + len(label1.replace("<leaf>", ""))
-        else:
-            return int(label1 != label2)
+def clear_gpu_cache():
+    """Clear GPU cache to free memory"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    @staticmethod
-    def insert_and_remove_cost(node: Node):
-        """
-        Insert and remove cost for tree edit distance.
-        If leaf node, cost is length of label name.
-        Otherwise, 1
-        """
-        label = node.label
-        if "<leaf>" in label:
-            return len(label.replace("<leaf>", ""))
-        else:
-            return 1
 
-    def normalize_dict(self, data: Union[Dict, List, Any]):
-        """
-        Sort by value, while iterate over element if data is list
-        """
-        if not data:
-            return {}
+def setup_logging(log_dir: Path, name: str = "donut") -> logging.Logger:
+    """Setup comprehensive logging for Donut operations"""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create logger
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers to avoid duplicates
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler
+    file_handler = logging.FileHandler(log_dir / f'{name}.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    
+    # Error file handler for critical errors
+    error_handler = logging.FileHandler(log_dir / f'{name}_errors.log')
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(file_formatter)
+    logger.addHandler(error_handler)
+    
+    return logger
 
-        if isinstance(data, dict):
-            new_data = dict()
-            for key in sorted(data.keys(), key=lambda k: (len(k), k)):
-                value = self.normalize_dict(data[key])
-                if value:
-                    if not isinstance(value, list):
-                        value = [value]
-                    new_data[key] = value
 
-        elif isinstance(data, list):
-            if all(isinstance(item, dict) for item in data):
-                new_data = []
-                for item in data:
-                    item = self.normalize_dict(item)
-                    if item:
-                        new_data.append(item)
-            else:
-                new_data = sorted(data)
-        else:
-            new_data = data
+def validate_config(config: Dict) -> bool:
+    """Validate configuration parameters"""
+    required_fields = ['input_size', 'max_length', 'train_batch_sizes', 'val_batch_sizes']
+    
+    for field in required_fields:
+        if field not in config:
+            logging.error(f"Missing required config field: {field}")
+            return False
+    
+    # Validate input size
+    if not isinstance(config['input_size'], list) or len(config['input_size']) != 2:
+        logging.error("input_size must be a list of 2 integers [height, width]")
+        return False
+    
+    # Validate batch sizes
+    if not isinstance(config['train_batch_sizes'], list) or len(config['train_batch_sizes']) == 0:
+        logging.error("train_batch_sizes must be a non-empty list")
+        return False
+    
+    return True
 
-        return new_data
 
-    def cal_f1(self, preds: List[dict], answers: List[dict]):
-        """
-        Calculate global F1 accuracy score (field-level, micro-averaged) by counting all true positives, false negatives and false positives
-        """
-        total_tp, total_fn_or_fp = 0, 0
-        for pred, answer in zip(preds, answers):
-            pred, answer = self.flatten(self.normalize_dict(pred)), self.flatten(self.normalize_dict(answer))
-            for field in pred:
-                if field in answer:
-                    total_tp += 1
-                    answer.remove(field)
-                else:
-                    total_fn_or_fp += 1
-            total_fn_or_fp += len(answer)
-        return total_tp / (total_tp + total_fn_or_fp / 2)
-
-    def construct_tree_from_dict(self, data: Union[Dict, List], node_name: str = None):
-        """
-        Convert Dictionary into Tree
-
-        Example:
-            input(dict)
-
-                {
-                    "menu": [
-                        {"name" : ["cake"], "count" : ["2"]},
-                        {"name" : ["juice"], "count" : ["1"]},
-                    ]
-                }
-
-            output(tree)
-                                     <root>
-                                       |
-                                     menu
-                                    /    \
-                             <subtree>  <subtree>
-                            /      |     |      \
-                         name    count  name    count
-                        /         |     |         \
-                  <leaf>cake  <leaf>2  <leaf>juice  <leaf>1
-         """
-        if node_name is None:
-            node_name = "<root>"
-
-        node = Node(node_name)
-
-        if isinstance(data, dict):
-            for key, value in data.items():
-                kid_node = self.construct_tree_from_dict(value, key)
-                node.addkid(kid_node)
-        elif isinstance(data, list):
-            if all(isinstance(item, dict) for item in data):
-                for item in data:
-                    kid_node = self.construct_tree_from_dict(
-                        item,
-                        "<subtree>",
-                    )
-                    node.addkid(kid_node)
-            else:
-                for item in data:
-                    node.addkid(Node(f"<leaf>{item}"))
-        else:
-            raise Exception(data, node_name)
-        return node
-
-    def cal_acc(self, pred: dict, answer: dict):
-        """
-        Calculate normalized tree edit distance(nTED) based accuracy.
-        1) Construct tree from dict,
-        2) Get tree distance with insert/remove/update cost,
-        3) Divide distance with GT tree size (i.e., nTED),
-        4) Calculate nTED based accuracy. (= max(1 - nTED, 0 ).
-        """
-        pred = self.construct_tree_from_dict(self.normalize_dict(pred))
-        answer = self.construct_tree_from_dict(self.normalize_dict(answer))
-        return max(
-            0,
-            1
-            - (
-                zss.distance(
-                    pred,
-                    answer,
-                    get_children=zss.Node.get_children,
-                    insert_cost=self.insert_and_remove_cost,
-                    remove_cost=self.insert_and_remove_cost,
-                    update_cost=self.update_cost,
-                    return_operations=False,
-                )
-                / zss.distance(
-                    self.construct_tree_from_dict(self.normalize_dict({})),
-                    answer,
-                    get_children=zss.Node.get_children,
-                    insert_cost=self.insert_and_remove_cost,
-                    remove_cost=self.insert_and_remove_cost,
-                    update_cost=self.update_cost,
-                    return_operations=False,
-                )
-            ),
-        )
+def get_optimal_batch_size(gpu_memory_gb: float, model_size_mb: float) -> int:
+    """Calculate optimal batch size based on available GPU memory"""
+    # Rough estimation: reserve 20% for overhead, rest for model and data
+    available_memory = gpu_memory_gb * 0.8
+    model_memory_gb = model_size_mb / 1024
+    
+    # Estimate memory per sample (rough approximation)
+    memory_per_sample_gb = 0.5  # This varies based on input size and model
+    
+    optimal_batch_size = int((available_memory - model_memory_gb) / memory_per_sample_gb)
+    return max(1, min(optimal_batch_size, 32))  # Clamp between 1 and 32

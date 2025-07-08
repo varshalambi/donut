@@ -25,86 +25,17 @@ from pytorch_lightning.utilities import rank_zero_only
 from sconf import Config
 
 from donut import DonutDataset
+from donut.util import PerformanceMonitor, setup_logging
 from lightning_module import DonutDataPLModule, DonutModelPLModule
 
 
-class PerformanceMonitor:
-    """Monitor training performance and provide insights"""
-    
-    def __init__(self, logger):
-        self.logger = logger
-        self.start_time = None
-        self.epoch_times = []
-        self.batch_times = []
-        self.memory_usage = []
-        
-    def start_training(self):
-        self.start_time = time.time()
-        self.logger.info("⏱️  Performance monitoring started")
-        
-    def log_epoch_time(self, epoch, epoch_time):
-        self.epoch_times.append(epoch_time)
-        avg_epoch_time = np.mean(self.epoch_times)
-        self.logger.info(f"⏱️  Epoch {epoch} took {epoch_time:.2f}s (avg: {avg_epoch_time:.2f}s)")
-        
-    def log_memory_usage(self):
-        if torch.cuda.is_available():
-            memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-            memory_reserved = torch.cuda.memory_reserved() / 1024**3  # GB
-            self.logger.info(f"💾 GPU Memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
-            
-    def end_training(self):
-        if self.start_time:
-            total_time = time.time() - self.start_time
-            self.logger.info(f"⏱️  Total training time: {total_time:.2f}s ({total_time/3600:.2f}h)")
-            
-            if self.epoch_times:
-                avg_epoch = np.mean(self.epoch_times)
-                self.logger.info(f"📊 Average epoch time: {avg_epoch:.2f}s")
-                self.logger.info(f"📊 Fastest epoch: {min(self.epoch_times):.2f}s")
-                self.logger.info(f"📊 Slowest epoch: {max(self.epoch_times):.2f}s")
+
 
 
 def setup_logging(config):
     """Setup comprehensive logging for training"""
     log_dir = Path(config.result_path) / config.exp_name / config.exp_version
-    log_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create logger
-    logger = logging.getLogger('donut_training')
-    logger.setLevel(logging.INFO)
-    
-    # Remove existing handlers to avoid duplicates
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-    
-    # Console handler with color formatting
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
-    
-    # File handler for detailed logs
-    file_handler = logging.FileHandler(log_dir / 'training.log')
-    file_handler.setLevel(logging.DEBUG)
-    file_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
-    
-    # Error file handler
-    error_handler = logging.FileHandler(log_dir / 'errors.log')
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(file_formatter)
-    logger.addHandler(error_handler)
-    
-    return logger
+    return setup_logging(log_dir, 'donut_training')
 
 
 @rank_zero_only
@@ -234,7 +165,7 @@ def train(config):
     logger = setup_logging(config)
     
     # Initialize performance monitor
-    perf_monitor = PerformanceMonitor(logger)
+    perf_monitor = PerformanceMonitor("donut_training", logger)
     
     try:
         # Log system information
