@@ -35,7 +35,8 @@ from lightning_module import DonutDataPLModule, DonutModelPLModule
 def setup_logging(config):
     """Setup comprehensive logging for training"""
     log_dir = Path(config.result_path) / config.exp_name / config.exp_version
-    return setup_logging(log_dir, 'donut_training')
+    from donut.util import setup_logging as util_setup_logging
+    return util_setup_logging(log_dir, 'donut_training')
 
 
 @rank_zero_only
