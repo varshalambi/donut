@@ -5,8 +5,138 @@ import logging
 import time
 import torch
 import numpy as np
-from typing import Dict, Optional, List
+import json
+from typing import Dict, Optional, List, Any, Union
 from pathlib import Path
+from datasets import load_dataset
+from PIL import Image
+
+
+class DonutDataset:
+    """
+    Dataset wrapper for Donut model training and inference
+    """
+    
+    def __init__(
+        self,
+        dataset_name_or_path: str,
+        donut_model,
+        max_length: int = 768,
+        split: str = "train",
+        task_start_token: str = "<s_cord>",
+        prompt_end_token: str = "<s_answer>",
+        sort_json_key: bool = True,
+    ):
+        self.dataset_name_or_path = dataset_name_or_path
+        self.donut_model = donut_model
+        self.max_length = max_length
+        self.split = split
+        self.task_start_token = task_start_token
+        self.prompt_end_token = prompt_end_token
+        self.sort_json_key = sort_json_key
+        
+        # Load dataset
+        self.dataset = load_dataset(dataset_name_or_path, split=split)
+        
+    def __len__(self):
+        return len(self.dataset)
+        
+    def __getitem__(self, idx):
+        sample = self.dataset[idx]
+        
+        # Load image
+        if isinstance(sample["image"], str):
+            image = Image.open(sample["image"]).convert("RGB")
+        else:
+            image = sample["image"]
+            
+        # Load ground truth
+        ground_truth = json.loads(sample["ground_truth"])
+        
+        # Prepare input for model
+        if "gt_parses" in ground_truth:
+            # For DocVQA task
+            gt_parse = ground_truth["gt_parses"][0]
+        else:
+            # For other tasks
+            gt_parse = ground_truth["gt_parse"]
+            
+        # Convert to JSON string
+        if self.sort_json_key:
+            gt_parse = json.dumps(gt_parse, sort_keys=True)
+        else:
+            gt_parse = json.dumps(gt_parse)
+            
+        # Create prompt
+        prompt = f"{self.task_start_token}{self.prompt_end_token}"
+        
+        # Tokenize
+        decoder_input_ids = self.donut_model.tokenizer(
+            prompt,
+            add_special_tokens=False,
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )["input_ids"]
+        
+        # Create target
+        target = self.donut_model.tokenizer(
+            gt_parse,
+            add_special_tokens=False,
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )["input_ids"]
+        
+        return image, decoder_input_ids, target
+
+
+class JSONParseEvaluator:
+    """
+    Evaluator for JSON parsing tasks
+    """
+    
+    def __init__(self):
+        pass
+        
+    def cal_acc(self, pred: Dict, gt: Dict) -> float:
+        """
+        Calculate accuracy between prediction and ground truth
+        """
+        try:
+            # Simple exact match for now
+            return float(pred == gt)
+        except:
+            return 0.0
+            
+    def cal_f1(self, predictions: List[Dict], ground_truths: List[Dict]) -> float:
+        """
+        Calculate F1 score between predictions and ground truths
+        """
+        if not predictions or not ground_truths:
+            return 0.0
+            
+        # Simple implementation - can be enhanced based on specific needs
+        correct = sum(1 for pred, gt in zip(predictions, ground_truths) if pred == gt)
+        return correct / len(predictions) if predictions else 0.0
+
+
+def load_json(path: Union[str, Path]) -> Any:
+    """
+    Load JSON from file
+    """
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def save_json(data: Any, path: Union[str, Path]) -> None:
+    """
+    Save data as JSON to file
+    """
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 class PerformanceMonitor:
