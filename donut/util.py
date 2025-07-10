@@ -71,7 +71,7 @@ class DonutDataset:
         prompt = f"{self.task_start_token}{self.prompt_end_token}"
         
         # Tokenize
-        decoder_input_ids = self.donut_model.tokenizer(
+        decoder_input_ids = self.donut_model.decoder.tokenizer(
             prompt,
             add_special_tokens=False,
             max_length=self.max_length,
@@ -81,7 +81,7 @@ class DonutDataset:
         )["input_ids"]
         
         # Create target
-        target = self.donut_model.tokenizer(
+        target = self.donut_model.decoder.tokenizer(
             gt_parse,
             add_special_tokens=False,
             max_length=self.max_length,
