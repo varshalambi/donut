@@ -73,9 +73,6 @@ class DonutDataset:
         # Create prompt
         prompt = f"{self.task_start_token}{self.prompt_end_token}"
         
-        # Add special tokens if they don't exist
-        self.donut_model.decoder.add_special_tokens([self.task_start_token, self.prompt_end_token])
-        
         # Tokenize prompt
         decoder_input_ids = self.donut_model.decoder.tokenizer(
             prompt,

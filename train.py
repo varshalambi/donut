@@ -11,6 +11,7 @@ import os
 import random
 import sys
 import time
+import multiprocessing
 from io import BytesIO
 from os.path import basename
 from pathlib import Path
@@ -27,6 +28,9 @@ from sconf import Config
 from donut import DonutDataset
 from donut.util import PerformanceMonitor, setup_logging
 from lightning_module import DonutDataPLModule, DonutModelPLModule
+
+# Fix for CUDA multiprocessing issues
+multiprocessing.set_start_method('spawn', force=True)
 
 
 
