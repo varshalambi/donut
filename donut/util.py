@@ -50,6 +50,9 @@ class DonutDataset:
         else:
             image = sample["image"]
             
+        # Convert image to tensor using the encoder's prepare_input method
+        image_tensor = self.donut_model.encoder.prepare_input(image)
+            
         # Load ground truth
         ground_truth = json.loads(sample["ground_truth"])
         
@@ -90,7 +93,7 @@ class DonutDataset:
             return_tensors="pt",
         )["input_ids"]
         
-        return image, decoder_input_ids, target
+        return image_tensor, decoder_input_ids, target
 
 
 class JSONParseEvaluator:
