@@ -73,7 +73,7 @@ class DonutDataset:
         # Create prompt
         prompt = f"{self.task_start_token}{self.prompt_end_token}"
         
-        # Tokenize
+        # Tokenize prompt
         decoder_input_ids = self.donut_model.decoder.tokenizer(
             prompt,
             add_special_tokens=False,
@@ -83,17 +83,25 @@ class DonutDataset:
             return_tensors="pt",
         )["input_ids"]
         
-        # Create target
-        target = self.donut_model.decoder.tokenizer(
-            gt_parse,
-            add_special_tokens=False,
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )["input_ids"]
+        # Find prompt end index
+        prompt_end_idx = len(self.donut_model.decoder.tokenizer.encode(prompt)) - 1
         
-        return image_tensor, decoder_input_ids, target
+        # For training: return (image_tensor, decoder_input_ids, decoder_labels)
+        # For validation: return (image_tensor, decoder_input_ids, prompt_end_idx, answer)
+        if self.split == "train":
+            # Create decoder_labels for training
+            decoder_labels = self.donut_model.decoder.tokenizer(
+                gt_parse,
+                add_special_tokens=False,
+                max_length=self.max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )["input_ids"]
+            return image_tensor, decoder_input_ids, decoder_labels
+        else:
+            # For validation, return the answer string
+            return image_tensor, decoder_input_ids, prompt_end_idx, gt_parse
 
 
 class JSONParseEvaluator:
@@ -109,10 +117,36 @@ class JSONParseEvaluator:
         Calculate accuracy between prediction and ground truth
         """
         try:
-            # Simple exact match for now
-            return float(pred == gt)
-        except:
+            # Handle different data types and structures
+            if isinstance(pred, dict) and isinstance(gt, dict):
+                # Recursive comparison for nested dictionaries
+                return float(self._compare_dicts(pred, gt))
+            elif isinstance(pred, list) and isinstance(gt, list):
+                # Compare lists
+                return float(pred == gt)
+            else:
+                # Direct comparison
+                return float(pred == gt)
+        except Exception as e:
+            # Log error for debugging
+            print(f"Error in cal_acc: {e}")
             return 0.0
+            
+    def _compare_dicts(self, pred: Dict, gt: Dict) -> bool:
+        """
+        Recursively compare dictionaries, handling nested structures
+        """
+        if set(pred.keys()) != set(gt.keys()):
+            return False
+            
+        for key in pred:
+            if isinstance(pred[key], dict) and isinstance(gt[key], dict):
+                if not self._compare_dicts(pred[key], gt[key]):
+                    return False
+            elif pred[key] != gt[key]:
+                return False
+                
+        return True
             
     def cal_f1(self, predictions: List[Dict], ground_truths: List[Dict]) -> float:
         """
@@ -121,9 +155,23 @@ class JSONParseEvaluator:
         if not predictions or not ground_truths:
             return 0.0
             
-        # Simple implementation - can be enhanced based on specific needs
-        correct = sum(1 for pred, gt in zip(predictions, ground_truths) if pred == gt)
-        return correct / len(predictions) if predictions else 0.0
+        # Calculate precision and recall
+        correct = 0
+        total_pred = len(predictions)
+        total_gt = len(ground_truths)
+        
+        for pred, gt in zip(predictions, ground_truths):
+            if self.cal_acc(pred, gt) > 0.5:  # Threshold for considering correct
+                correct += 1
+                
+        precision = correct / total_pred if total_pred > 0 else 0.0
+        recall = correct / total_gt if total_gt > 0 else 0.0
+        
+        # Calculate F1 score
+        if precision + recall > 0:
+            return 2 * (precision * recall) / (precision + recall)
+        else:
+            return 0.0
 
 
 def load_json(path: Union[str, Path]) -> Any:
