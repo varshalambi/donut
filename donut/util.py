@@ -73,6 +73,9 @@ class DonutDataset:
         # Create prompt
         prompt = f"{self.task_start_token}{self.prompt_end_token}"
         
+        # Add special tokens if they don't exist
+        self.donut_model.decoder.add_special_tokens([self.task_start_token, self.prompt_end_token])
+        
         # Tokenize prompt
         decoder_input_ids = self.donut_model.decoder.tokenizer(
             prompt,
@@ -89,9 +92,12 @@ class DonutDataset:
         # For training: return (image_tensor, decoder_input_ids, decoder_labels)
         # For validation: return (image_tensor, decoder_input_ids, prompt_end_idx, answer)
         if self.split == "train":
-            # Create decoder_labels for training
+            # Convert JSON to token sequence using the model's json2token method
+            token_sequence = self.donut_model.json2token(gt_parse, update_special_tokens_for_json_key=True, sort_json_key=self.sort_json_key)
+            
+            # Tokenize the sequence
             decoder_labels = self.donut_model.decoder.tokenizer(
-                gt_parse,
+                token_sequence,
                 add_special_tokens=False,
                 max_length=self.max_length,
                 padding="max_length",
