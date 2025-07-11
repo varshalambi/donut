@@ -30,8 +30,22 @@ HTML_TAG_PATTERN = re.compile(r'<[^>]+>')
 
 
 def get_logger():
-    """Get the logger instance for lightning module"""
-    return logging.getLogger('donut_training')
+    """Get the logger instance for lightning module with file information"""
+    logger = logging.getLogger('donut_training')
+    
+    # Ensure the logger has the proper formatter with file information
+    if not logger.handlers:
+        # If no handlers, add a console handler with file info
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
+    
+    return logger
 
 
 class DonutModelPLModule(pl.LightningModule):

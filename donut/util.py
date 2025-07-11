@@ -77,8 +77,19 @@ class DonutDataset:
         prompt = f"{self.task_start_token}{self.prompt_end_token}"
         
         # Debug: Check what tokens are being generated
-        print(f"DEBUG: Prompt: '{prompt}'")
-        print(f"DEBUG: Task tokens: '{self.task_start_token}', '{self.prompt_end_token}'")
+        logger = logging.getLogger('donut_training')
+        if not logger.handlers:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s] - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            console_handler.setFormatter(console_formatter)
+            logger.addHandler(console_handler)
+        
+        logger.debug(f"DEBUG: Prompt: '{prompt}'")
+        logger.debug(f"DEBUG: Task tokens: '{self.task_start_token}', '{self.prompt_end_token}'")
         
         # Tokenize prompt
         decoder_input_ids = self.donut_model.decoder.tokenizer(
@@ -90,7 +101,7 @@ class DonutDataset:
             return_tensors="pt",
         )["input_ids"]
         
-        print(f"DEBUG: Tokenized prompt shape: {decoder_input_ids.shape}")
+        logger.debug(f"DEBUG: Tokenized prompt shape: {decoder_input_ids.shape}")
         
         # Find prompt end index
         prompt_end_idx = len(self.donut_model.decoder.tokenizer.encode(prompt)) - 1
@@ -101,8 +112,8 @@ class DonutDataset:
             # Convert JSON to token sequence using the model's json2token method
             token_sequence = self.donut_model.json2token(gt_parse, update_special_tokens_for_json_key=True, sort_json_key=self.sort_json_key)
             
-            print(f"DEBUG: Ground truth JSON: {gt_parse}")
-            print(f"DEBUG: Token sequence: '{token_sequence}'")
+            logger.debug(f"DEBUG: Ground truth JSON: {gt_parse}")
+            logger.debug(f"DEBUG: Token sequence: '{token_sequence}'")
             
             # Tokenize the sequence
             decoder_labels = self.donut_model.decoder.tokenizer(
@@ -114,8 +125,7 @@ class DonutDataset:
                 return_tensors="pt",
             )["input_ids"]
             
-            print(f"DEBUG: Tokenized labels shape: {decoder_labels.shape}")
-            print(f"DEBUG: Tokenized labels content: {decoder_labels}")
+            logger.debug(f"DEBUG: Tokenized labels shape: {decoder_labels.shape}")
             
             return image_tensor, decoder_input_ids, decoder_labels
         else:
@@ -148,7 +158,18 @@ class JSONParseEvaluator:
                 return float(pred == gt)
         except Exception as e:
             # Log error for debugging
-            print(f"Error in cal_acc: {e}")
+            logger = logging.getLogger('donut_training')
+            if not logger.handlers:
+                console_handler = logging.StreamHandler()
+                console_handler.setLevel(logging.INFO)
+                console_formatter = logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s] - %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S'
+                )
+                console_handler.setFormatter(console_formatter)
+                logger.addHandler(console_handler)
+            
+            logger.error(f"Error in cal_acc: {e}")
             return 0.0
             
     def _compare_dicts(self, pred: Dict, gt: Dict) -> bool:
@@ -410,21 +431,34 @@ def setup_logging(log_dir: Path, name: str = "donut") -> logging.Logger:
 
 def validate_config(config: Dict) -> bool:
     """Validate configuration parameters"""
+    logger = logging.getLogger('donut_training')
+    
+    # Ensure the logger has the proper formatter with file information
+    if not logger.handlers:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
+    
     required_fields = ['input_size', 'max_length', 'train_batch_sizes', 'val_batch_sizes']
     
     for field in required_fields:
         if field not in config:
-            logging.error(f"Missing required config field: {field}")
+            logger.error(f"Missing required config field: {field}")
             return False
     
     # Validate input size
     if not isinstance(config['input_size'], list) or len(config['input_size']) != 2:
-        logging.error("input_size must be a list of 2 integers [height, width]")
+        logger.error("input_size must be a list of 2 integers [height, width]")
         return False
     
     # Validate batch sizes
     if not isinstance(config['train_batch_sizes'], list) or len(config['train_batch_sizes']) == 0:
-        logging.error("train_batch_sizes must be a non-empty list")
+        logger.error("train_batch_sizes must be a non-empty list")
         return False
     
     return True

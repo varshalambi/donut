@@ -98,5 +98,16 @@ if __name__ == "__main__":
         demo.launch(server_name=args.url, server_port=args.port)
         
     except Exception as e:
-        print(f"❌ Failed to start demo: {str(e)}")
+        logger = logging.getLogger('donut_demo')
+        if not logger.handlers:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s] - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            console_handler.setFormatter(console_formatter)
+            logger.addHandler(console_handler)
+        
+        logger.error(f"❌ Failed to start demo: {str(e)}")
         raise
