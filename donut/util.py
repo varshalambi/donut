@@ -91,7 +91,6 @@ class DonutDataset:
         )["input_ids"]
         
         print(f"DEBUG: Tokenized prompt shape: {decoder_input_ids.shape}")
-        print(f"DEBUG: Tokenized prompt content: {decoder_input_ids}")
         
         # Find prompt end index
         prompt_end_idx = len(self.donut_model.decoder.tokenizer.encode(prompt)) - 1
