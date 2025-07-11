@@ -107,10 +107,6 @@ class DonutModelPLModule(pl.LightningModule):
             batch, self._logger if batch_idx % 100 == 0 else None
         )
         
-        # Debug tensor shapes for first few batches to catch issues early
-        if batch_idx < 3:
-            self._logger.info(f"DEBUG Batch {batch_idx} - images: {image_tensors.shape}, input_ids: {decoder_input_ids.shape}, labels: {decoder_labels.shape}")
-            
         loss = self.model(image_tensors, decoder_input_ids, decoder_labels)[0]
         
         # Track batch time and GPU memory
@@ -147,9 +143,9 @@ class DonutModelPLModule(pl.LightningModule):
             batch_first=True,
         )
 
-        # Log batch info periodically
+        # Log validation step info periodically
         if batch_idx % 50 == 0:
-            self._logger.debug(f"Validation batch shapes - images: {image_tensors.shape}, prompts: {decoder_prompts.shape}")
+            self._logger.debug(f"Validation step {batch_idx} (dataloader {dataloader_idx}): Processing batch")
 
         preds = self.model.inference(
             image_tensors=image_tensors,

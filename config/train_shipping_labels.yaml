@@ -1,0 +1,65 @@
+# Donut Training Configuration for Shipping Labels Dataset
+# Based on the CORD configuration but optimized for shipping labels
+
+# Paths and Experiment Configuration
+resume_from_checkpoint_path: null  # only used for resume_from_checkpoint option in PL
+result_path: "./result"
+exp_name: "train_shipping_labels"
+exp_version: "v1"
+
+# Model Configuration
+pretrained_model_name_or_path: "naver-clova-ix/donut-base"
+input_size: [1280, 960]  # Good resolution for shipping label readability
+max_length: 768  # Maximum sequence length for shipping label text
+align_long_axis: False  # Keep original orientation
+
+# Dataset Configuration
+dataset_name_or_paths: ["../dataset/shipping_labels_dataset"]
+sort_json_key: True  # Important for consistent JSON ordering in shipping labels
+
+# Training Configuration
+train_batch_sizes: [8]  # Adjust based on your GPU memory
+val_batch_sizes: [1]
+lr: 3e-5  # Learning rate
+warmup_steps: 300  # Learning rate warmup
+max_epochs: 30  # Training epochs
+max_steps: -1  # -1 means use max_epochs
+num_workers: 8  # Data loading workers
+gradient_clip_val: 1.0  # Gradient clipping for stability
+
+# Model Architecture (using donut-base)
+# Encoder: SwinTransformer (2,2,14,2) layers
+# Decoder: BART 4 layers
+# Input size: 1280x960
+# Window size: 10
+
+# Optimization Settings
+accumulate_grad_batches: 1  # Gradient accumulation
+precision: 16  # Mixed precision training
+accelerator: "gpu"  # Use GPU
+devices: 1  # Number of GPUs
+num_nodes: 1
+
+# Logging and Checkpointing
+log_every_n_steps: 10
+val_check_interval: 0.5  # Validate every 50% of epoch
+check_val_every_n_epoch: 3
+save_top_k: 3  # Save top 3 checkpoints
+monitor: "val_loss"  # Monitor validation loss
+mode: "min"  # Minimize validation loss
+
+# Early Stopping
+early_stopping_patience: 5  # Stop if no improvement for 5 epochs
+
+# Additional Settings
+seed: 2022
+verbose: True
+num_training_samples_per_epoch: 800
+
+# Task-specific settings for shipping labels
+# The model will learn to extract:
+# - sender information
+# - recipient information  
+# - tracking numbers
+# - package details
+# - carrier information 

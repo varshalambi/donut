@@ -137,3 +137,15 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Project-specific files and folders
+# These contain personal data and should not be committed to public repo
+project_data/
+*.DS_Store
+result/
+dataset/
+shipping_labels_dataset/
+custom_shipping_dataset/
+example_*.json
+example_batch/
+dataset_*/

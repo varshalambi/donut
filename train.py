@@ -189,8 +189,14 @@ def train(config):
         logger.info("📚 Setting up datasets...")
         datasets = {"train": [], "validation": []}
         for i, dataset_name_or_path in enumerate(config.dataset_name_or_paths):
-            task_name = os.path.basename(dataset_name_or_path)  # e.g., cord-v2, docvqa, rvlcdip, ...
+            # Use CORD task tokens for fine-tuning (since we're using donut-base which was trained on CORD)
+            if "shipping_labels" in dataset_name_or_path:
+                task_name = "cord"  # Use CORD task tokens for fine-tuning
+            else:
+                task_name = os.path.basename(dataset_name_or_path)  # e.g., cord-v2, docvqa, rvlcdip, ...
             logger.info(f"  Processing dataset {i+1}/{len(config.dataset_name_or_paths)}: {task_name}")
+            logger.info(f"  DEBUG: Dataset path: {dataset_name_or_path}")
+            logger.info(f"  DEBUG: Task name: {task_name}")
             
             # add categorical special tokens (optional)
             if task_name == "rvlcdip":
@@ -207,16 +213,20 @@ def train(config):
                 
             for split in ["train", "validation"]:
                 logger.info(f"    Creating {split} dataset for {task_name}")
+                task_start_token = config.task_start_tokens[i] if config.get("task_start_tokens", None) else f"<s_{task_name}>"
+                prompt_end_token = "<s_answer>" if "docvqa" in dataset_name_or_path else f"<s_{task_name}>"
+                
+                logger.info(f"    DEBUG: Task start token: '{task_start_token}'")
+                logger.info(f"    DEBUG: Prompt end token: '{prompt_end_token}'")
+                
                 datasets[split].append(
                     DonutDataset(
                         dataset_name_or_path=dataset_name_or_path,
                         donut_model=model_module.model,
                         max_length=config.max_length,
                         split=split,
-                        task_start_token=config.task_start_tokens[i]
-                        if config.get("task_start_tokens", None)
-                        else f"<s_{task_name}>",
-                        prompt_end_token="<s_answer>" if "docvqa" in dataset_name_or_path else f"<s_{task_name}>",
+                        task_start_token=task_start_token,
+                        prompt_end_token=prompt_end_token,
                         sort_json_key=config.sort_json_key,
                     )
                 )

@@ -23,7 +23,7 @@ class DonutDataset:
         donut_model,
         max_length: int = 768,
         split: str = "train",
-        task_start_token: str = "<s_cord>",
+        task_start_token: str = "<s_shipping_labels>",
         prompt_end_token: str = "<s_answer>",
         sort_json_key: bool = True,
     ):
@@ -34,6 +34,9 @@ class DonutDataset:
         self.task_start_token = task_start_token
         self.prompt_end_token = prompt_end_token
         self.sort_json_key = sort_json_key
+        
+        # Add special tokens to the tokenizer
+        self.donut_model.decoder.add_special_tokens([self.task_start_token, self.prompt_end_token])
         
         # Load dataset
         self.dataset = load_dataset(dataset_name_or_path, split=split)
@@ -73,6 +76,10 @@ class DonutDataset:
         # Create prompt
         prompt = f"{self.task_start_token}{self.prompt_end_token}"
         
+        # Debug: Check what tokens are being generated
+        print(f"DEBUG: Prompt: '{prompt}'")
+        print(f"DEBUG: Task tokens: '{self.task_start_token}', '{self.prompt_end_token}'")
+        
         # Tokenize prompt
         decoder_input_ids = self.donut_model.decoder.tokenizer(
             prompt,
@@ -83,6 +90,9 @@ class DonutDataset:
             return_tensors="pt",
         )["input_ids"]
         
+        print(f"DEBUG: Tokenized prompt shape: {decoder_input_ids.shape}")
+        print(f"DEBUG: Tokenized prompt content: {decoder_input_ids}")
+        
         # Find prompt end index
         prompt_end_idx = len(self.donut_model.decoder.tokenizer.encode(prompt)) - 1
         
@@ -91,6 +101,9 @@ class DonutDataset:
         if self.split == "train":
             # Convert JSON to token sequence using the model's json2token method
             token_sequence = self.donut_model.json2token(gt_parse, update_special_tokens_for_json_key=True, sort_json_key=self.sort_json_key)
+            
+            print(f"DEBUG: Ground truth JSON: {gt_parse}")
+            print(f"DEBUG: Token sequence: '{token_sequence}'")
             
             # Tokenize the sequence
             decoder_labels = self.donut_model.decoder.tokenizer(
@@ -101,6 +114,10 @@ class DonutDataset:
                 truncation=True,
                 return_tensors="pt",
             )["input_ids"]
+            
+            print(f"DEBUG: Tokenized labels shape: {decoder_labels.shape}")
+            print(f"DEBUG: Tokenized labels content: {decoder_labels}")
+            
             return image_tensor, decoder_input_ids, decoder_labels
         else:
             # For validation, return the answer string
@@ -320,8 +337,7 @@ def optimize_batch_processing(batch, logger: Optional[logging.Logger] = None):
         decoder_labels = torch.cat(all_decoder_labels, dim=0)
         
         if logger:
-            logger.debug(f"Multi-dataloader batch shapes - images: {image_tensors.shape}, "
-                        f"input_ids: {decoder_input_ids.shape}, labels: {decoder_labels.shape}")
+            logger.debug(f"Multi-dataloader batch processed - {len(batch)} dataloaders")
     else:
         # Single dataloader - direct assignment
         image_tensors = batch[0]
@@ -329,8 +345,7 @@ def optimize_batch_processing(batch, logger: Optional[logging.Logger] = None):
         decoder_labels = batch[2][:, 1:]
         
         if logger:
-            logger.debug(f"Single dataloader batch shapes - images: {image_tensors.shape}, "
-                        f"input_ids: {decoder_input_ids.shape}, labels: {decoder_labels.shape}")
+            logger.debug(f"Single dataloader batch processed")
     
     return image_tensors, decoder_input_ids, decoder_labels
 
@@ -354,7 +369,7 @@ def clear_gpu_cache():
 
 
 def setup_logging(log_dir: Path, name: str = "donut") -> logging.Logger:
-    """Setup comprehensive logging for Donut operations"""
+    """Setup comprehensive logging for Donut operations with file information"""
     log_dir.mkdir(parents=True, exist_ok=True)
     
     # Create logger
@@ -365,21 +380,21 @@ def setup_logging(log_dir: Path, name: str = "donut") -> logging.Logger:
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
     
-    # Console handler
+    # Console handler with file information
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     console_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
     
-    # File handler
+    # File handler with detailed information
     file_handler = logging.FileHandler(log_dir / f'{name}.log')
     file_handler.setLevel(logging.DEBUG)
     file_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
+        '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(funcName)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     file_handler.setFormatter(file_formatter)
