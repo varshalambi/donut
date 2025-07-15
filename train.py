@@ -23,6 +23,7 @@ from sconf import Config
 
 from donut import DonutDataset
 from lightning_module import DonutDataPLModule, DonutModelPLModule
+import logging
 
 
 class CustomCheckpointIO(CheckpointIO):
@@ -78,18 +79,23 @@ def set_seed(seed):
 
 
 def train(config):
+    logging.info('Setting random seed for reproducibility')
     set_seed(config.get("seed", 42))
 
+    logging.info('Initializing model module')
     model_module = DonutModelPLModule(config)
+    logging.info('Initializing data module')
     data_module = DonutDataPLModule(config)
 
     # add datasets to data_module
     datasets = {"train": [], "validation": []}
     for i, dataset_name_or_path in enumerate(config.dataset_name_or_paths):
         task_name = os.path.basename(dataset_name_or_path)  # e.g., cord-v2, docvqa, rvlcdip, ...
+        logging.debug(f'Processing dataset: {dataset_name_or_path} (task: {task_name})')
         
         # add categorical special tokens (optional)
         if task_name == "rvlcdip":
+            logging.info('Adding special tokens for rvlcdip task')
             model_module.model.decoder.add_special_tokens([
                 "<advertisement/>", "<budget/>", "<email/>", "<file_folder/>", 
                 "<form/>", "<handwritten/>", "<invoice/>", "<letter/>", 
@@ -97,9 +103,11 @@ def train(config):
                 "<resume/>", "<scientific_publication/>", "<scientific_report/>", "<specification/>"
             ])
         if task_name == "docvqa":
+            logging.info('Adding special tokens for docvqa task')
             model_module.model.decoder.add_special_tokens(["<yes/>", "<no/>"])
             
         for split in ["train", "validation"]:
+            logging.debug(f'Adding {split} split for dataset: {dataset_name_or_path}')
             datasets[split].append(
                 DonutDataset(
                     dataset_name_or_path=dataset_name_or_path,
@@ -125,6 +133,7 @@ def train(config):
         version=config.exp_version,
         default_hp_metric=False,
     )
+    logging.info('TensorBoard logger initialized')
 
     lr_callback = LearningRateMonitor(logging_interval="step")
 
@@ -140,6 +149,7 @@ def train(config):
     bar = ProgressBar(config)
 
     custom_ckpt = CustomCheckpointIO()
+    logging.info('Trainer initialization')
     trainer = pl.Trainer(
         num_nodes=config.get("num_nodes", 1),
         devices=torch.cuda.device_count(),
@@ -156,11 +166,17 @@ def train(config):
         logger=logger,
         callbacks=[lr_callback, checkpoint_callback, bar],
     )
-
-    trainer.fit(model_module, data_module, ckpt_path=config.get("resume_from_checkpoint_path", None))
+    logging.info('Starting model training')
+    try:
+        trainer.fit(model_module, data_module, ckpt_path=config.get("resume_from_checkpoint_path", None))
+        logging.info('Training completed successfully')
+    except Exception as e:
+        logging.warning(f'Training failed: {e}')
+        raise
 
 
 if __name__ == "__main__":
+    logging.debug('Starting configuration loading')
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--exp_version", type=str, required=False)
@@ -172,5 +188,7 @@ if __name__ == "__main__":
     config.exp_name = basename(args.config).split(".")[0]
     config.exp_version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") if not args.exp_version else args.exp_version
 
+    logging.info('Saving configuration file')
     save_config_file(config, Path(config.result_path) / config.exp_name / config.exp_version)
+    logging.info('Launching training process')
     train(config)

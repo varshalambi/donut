@@ -16,6 +16,12 @@ from nltk import edit_distance
 from torch.utils.data import Dataset
 from transformers.modeling_utils import PreTrainedModel
 from zss import Node
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(filename)s:%(lineno)d | %(levelname)s | %(message)s'
+)
 
 
 def save_json(write_path: Union[str, bytes, os.PathLike], save_obj: Any):

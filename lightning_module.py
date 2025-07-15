@@ -19,14 +19,16 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 from donut import DonutConfig, DonutModel
+import logging
 
 
 class DonutModelPLModule(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
-
+        logging.info('Initializing DonutModelPLModule')
         if self.config.get("pretrained_model_name_or_path", False):
+            logging.info(f'Loading pretrained model from {self.config.pretrained_model_name_or_path}')
             self.model = DonutModel.from_pretrained(
                 self.config.pretrained_model_name_or_path,
                 input_size=self.config.input_size,
@@ -35,6 +37,7 @@ class DonutModelPLModule(pl.LightningModule):
                 ignore_mismatched_sizes=True,
             )
         else:
+            logging.info('Initializing new DonutModel from config')
             self.model = DonutModel(
                 config=DonutConfig(
                     input_size=self.config.input_size,
@@ -48,6 +51,7 @@ class DonutModelPLModule(pl.LightningModule):
         self.num_of_loaders = len(self.config.dataset_name_or_paths)
 
     def training_step(self, batch, batch_idx):
+        logging.debug(f'Training step {batch_idx} started')
         image_tensors, decoder_input_ids, decoder_labels = list(), list(), list()
         for batch_data in batch:
             image_tensors.append(batch_data[0])
@@ -60,14 +64,17 @@ class DonutModelPLModule(pl.LightningModule):
         self.log_dict({"train_loss": loss}, sync_dist=True)
         if not self.pytorch_lightning_version_is_1:
             self.log('loss', loss, prog_bar=True)
+        logging.debug(f'Training step {batch_idx} completed with loss: {loss}')
         return loss
 
     def on_validation_epoch_start(self) -> None:
+        logging.info('Validation epoch started')
         super().on_validation_epoch_start()
         self.validation_step_outputs = [[] for _ in range(self.num_of_loaders)]
         return
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        logging.debug(f'Validation step {batch_idx} (dataloader {dataloader_idx}) started')
         image_tensors, decoder_input_ids, prompt_end_idxs, answers = batch
         decoder_prompts = pad_sequence(
             [input_id[: end_idx + 1] for input_id, end_idx in zip(decoder_input_ids, prompt_end_idxs)],
@@ -89,15 +96,16 @@ class DonutModelPLModule(pl.LightningModule):
             scores.append(edit_distance(pred, answer) / max(len(pred), len(answer)))
 
             if self.config.get("verbose", False) and len(scores) == 1:
-                self.print(f"Prediction: {pred}")
-                self.print(f"    Answer: {answer}")
-                self.print(f" Normed ED: {scores[0]}")
+                logging.info(f"Prediction: {pred}")
+                logging.info(f"    Answer: {answer}")
+                logging.info(f" Normed ED: {scores[0]}")
 
         self.validation_step_outputs[dataloader_idx].append(scores)
-
+        logging.debug(f'Validation step {batch_idx} (dataloader {dataloader_idx}) completed')
         return scores
 
     def on_validation_epoch_end(self):
+        logging.info('Validation epoch ended')
         assert len(self.validation_step_outputs) == self.num_of_loaders
         cnt = [0] * self.num_of_loaders
         total_metric = [0] * self.num_of_loaders
@@ -112,6 +120,7 @@ class DonutModelPLModule(pl.LightningModule):
         self.log_dict({"val_metric": np.sum(total_metric) / np.sum(cnt)}, sync_dist=True)
 
     def configure_optimizers(self):
+        logging.info('Configuring optimizers and schedulers')
 
         max_iter = None
 
@@ -124,7 +133,8 @@ class DonutModelPLModule(pl.LightningModule):
         if int(self.config.get("max_steps", -1)) > 0:
             max_iter = min(self.config.max_steps, max_iter) if max_iter is not None else self.config.max_steps
 
-        assert max_iter is not None
+        if max_iter is None:
+            logging.warning('max_iter is None. Please check max_epochs and max_steps in config.')
         optimizer = torch.optim.Adam(self.parameters(), lr=self.config.lr)
         scheduler = {
             "scheduler": self.cosine_scheduler(optimizer, max_iter, self.config.warmup_steps),

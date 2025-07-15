@@ -22,6 +22,7 @@ from torchvision.transforms.functional import resize, rotate
 from transformers import MBartConfig, MBartForCausalLM, XLMRobertaTokenizer
 from transformers.file_utils import ModelOutput
 from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
+import logging
 
 
 class SwinEncoder(nn.Module):
@@ -48,6 +49,7 @@ class SwinEncoder(nn.Module):
         name_or_path: Union[str, bytes, os.PathLike] = None,
     ):
         super().__init__()
+        logging.info(f'Initializing SwinEncoder with input_size={input_size}, align_long_axis={align_long_axis}, window_size={window_size}, encoder_layer={encoder_layer}')
         self.input_size = input_size
         self.align_long_axis = align_long_axis
         self.window_size = window_size
@@ -73,6 +75,7 @@ class SwinEncoder(nn.Module):
 
         # weight init with swin
         if not name_or_path:
+            logging.info('Loading pretrained SwinTransformer weights from timm')
             swin_state_dict = timm.create_model("swin_base_patch4_window12_384", pretrained=True).state_dict()
             new_swin_state_dict = self.model.state_dict()
             for x in new_swin_state_dict:
@@ -154,6 +157,7 @@ class BARTDecoder(nn.Module):
         self, decoder_layer: int, max_position_embeddings: int, name_or_path: Union[str, bytes, os.PathLike] = None
     ):
         super().__init__()
+        logging.info(f'Initializing BARTDecoder with decoder_layer={decoder_layer}, max_position_embeddings={max_position_embeddings}')
         self.decoder_layer = decoder_layer
         self.max_position_embeddings = max_position_embeddings
 
@@ -182,6 +186,7 @@ class BARTDecoder(nn.Module):
 
         # weight init with asian-bart
         if not name_or_path:
+            logging.info('Loading pretrained MBartForCausalLM weights')
             bart_state_dict = MBartForCausalLM.from_pretrained("hyunwoongko/asian-bart-ecjk").state_dict()
             new_bart_state_dict = self.model.state_dict()
             for x in new_bart_state_dict:
@@ -382,6 +387,7 @@ class DonutModel(PreTrainedModel):
 
     def __init__(self, config: DonutConfig):
         super().__init__(config)
+        logging.info('Initializing DonutModel')
         self.config = config
         self.encoder = SwinEncoder(
             input_size=self.config.input_size,
@@ -397,6 +403,7 @@ class DonutModel(PreTrainedModel):
         )
 
     def forward(self, image_tensors: torch.Tensor, decoder_input_ids: torch.Tensor, decoder_labels: torch.Tensor):
+        logging.debug('Running forward pass of DonutModel')
         """
         Calculate a loss given an input image and a desired token sequence,
         the model will be trained in a teacher-forcing manner
@@ -423,6 +430,7 @@ class DonutModel(PreTrainedModel):
         return_json: bool = True,
         return_attentions: bool = False,
     ):
+        logging.debug('Running inference in DonutModel')
         """
         Generate a token sequence in an auto-regressive manner,
         the generated token sequence is convereted into an ordered JSON format
